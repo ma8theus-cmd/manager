@@ -1,0 +1,1232 @@
+from __future__ import annotations
+
+import re
+import unicodedata
+from datetime import datetime
+
+from playwright.async_api import Locator, Page
+
+from app.config import settings
+
+
+class ManualIntervention(RuntimeError):
+    """Raised when the authorized flow cannot safely continue automatically."""
+
+
+class MesLibertinesAdapter:
+    """
+    MesLibertines registration adapter.
+
+    Authorized automation implemented here:
+      - initial +18 / rules confirmation popup;
+      - date of birth in the +18 popup;
+      - Member account selection when the option exists;
+      - registration form fields;
+      - Terms and Conditions checkbox on the registration form;
+      - final Register submission;
+      - confirmation that the registration form actually disappeared/advanced.
+
+    The adapter deliberately does NOT attempt to solve or bypass CAPTCHA,
+    Cloudflare, rate limits, anti-bot challenges or access blocks. Those cases
+    are escalated to MANUAL_INTERVENTION.
+    """
+
+    HOME_URL = "https://www.meslibertines.com/"
+
+    async def register_member(self, page: Page, member: dict, password: str) -> None:
+        """Run the complete authorized registration flow for one member."""
+        form = await self.open_registration(page, member)
+        await self.fill_member_form(form, member, password)
+        await self.accept_terms(form)
+        await self._detect_protection(page)
+        await self.submit_registration(page, form)
+        await self._confirm_registration_advanced(page)
+
+    async def open_registration(self, page: Page, member: dict) -> Locator:
+        """
+        Open a fresh site session, complete the initial +18 confirmation when
+        it is shown, and then navigate directly to the registration page.
+        """
+        await page.goto(
+            self.HOME_URL,
+            wait_until="domcontentloaded",
+            timeout=45_000,
+        )
+        await page.wait_for_timeout(1_000)
+        await self._detect_protection(page)
+
+        await self.accept_initial_age_gate(page, member["birth_date"])
+        await self._detect_protection(page)
+
+        await page.goto(
+            settings.registration_url,
+            wait_until="domcontentloaded",
+            timeout=45_000,
+        )
+        await page.wait_for_timeout(800)
+        await self._detect_protection(page)
+
+        form = await self._registration_form(page)
+        if form is None:
+            raise ManualIntervention("Formulário de registro não encontrado.")
+        return form
+
+    async def accept_initial_age_gate(self, page: Page, birth_date: str, wait_ms: int = 10_000) -> bool:
+        """
+        Complete the initial +18 popup when present, including slow/late rendering.
+
+        MesLibertines can inject the modal in stages: the OK button/selects may
+        become visible before the authorization control is actionable. We first
+        wait for the modal marker, then give the controls their own bounded
+        readiness window. If no modal appears, return False without failing.
+        """
+        ok_button = None
+        polls = max(1, int(wait_ms / 250) + 1)
+        for attempt in range(polls):
+            ok_button = await self._find_visible_ok_button(page)
+            if ok_button is not None:
+                break
+            if attempt < polls - 1:
+                await page.wait_for_timeout(250)
+
+        if ok_button is None:
+            return False
+
+        # Anchor all popup controls to the smallest ancestor around OK that
+        # contains the three DOB selects. This prevents mixing controls from a
+        # login/registration form that might also be present underneath.
+        popup = ok_button.locator("xpath=ancestor::*[count(.//select) >= 3][1]")
+        if not await popup.count():
+            popup = page
+        else:
+            popup = popup.first
+
+        # The site is slow: once the popup is detected, its individual controls
+        # may still be arriving. Wait up to 12 seconds for all three selects.
+        selects = popup.locator("select:visible")
+        for _ in range(48):
+            if await selects.count() >= 3:
+                break
+            await page.wait_for_timeout(250)
+        if await selects.count() < 3:
+            raise ManualIntervention(
+                "Popup +18 detectado, mas os três campos de data não ficaram disponíveis."
+            )
+
+        checkbox = await self._find_age_gate_checkbox(popup, page)
+        if checkbox is None:
+            raise ManualIntervention(
+                "Popup +18 detectado, mas a confirmação de autorização não ficou disponível."
+            )
+
+        dt = datetime.strptime(birth_date, "%Y-%m-%d")
+        await self._select_numeric(selects.nth(0), dt.day, kind="day")
+        await self._select_numeric(selects.nth(1), dt.month, kind="month")
+        await self._select_numeric(selects.nth(2), dt.year, kind="year")
+
+        # Old site markup may visually style/hide the native checkbox. Use the
+        # native control when actionable; otherwise click its visible label,
+        # which reproduces the same user action without guessing coordinates.
+        await self._check_age_gate_authorization(checkbox, page)
+
+        # Re-resolve OK because legacy scripts can recreate the node after a DOB
+        # selection/change event.
+        ok_button = await self._find_visible_ok_button(page)
+        if ok_button is None:
+            raise ManualIntervention("Popup +18 ficou sem o botão OK antes da confirmação.")
+        await ok_button.click()
+
+        # Wait for the modal to disappear. Never click OK repeatedly.
+        for _ in range(48):
+            if await self._find_visible_ok_button(page) is None:
+                await page.wait_for_timeout(350)
+                return True
+            await page.wait_for_timeout(250)
+
+        raise ManualIntervention("A confirmação +18 foi enviada, mas o popup continuou aberto.")
+
+    async def fill_member_form(self, form: Locator, member: dict, password: str) -> None:
+        await self._choose_member(form)
+
+        await self._fill_text(
+            form,
+            ["Username", "Choose a username"],
+            ["username", "user", "login"],
+            member["username"],
+        )
+        await self._fill_text(
+            form,
+            ["Email", "Your email"],
+            ["email", "mail"],
+            member["email"],
+        )
+
+        password_inputs = form.locator('input[type="password"]')
+        if await password_inputs.count() < 2:
+            raise ManualIntervention("Não encontrei os dois campos de senha.")
+        await password_inputs.nth(0).fill(password)
+        await password_inputs.nth(1).fill(password)
+
+        # Depending on the site variant, country/city may be absent. They are
+        # filled when the form requests them, but absence is not considered a
+        # failure because the classic registration form may omit them.
+        await self._select_country_france(form, required=False)
+        await self._fill_text(
+            form,
+            ["Home city", "City"],
+            ["city", "ville"],
+            member["city_france"],
+            required=False,
+        )
+
+        await self._fill_birth_date(form, member["birth_date"])
+
+    async def accept_terms(self, form: Locator) -> None:
+        """Check the registration Terms and Conditions checkbox."""
+        checkbox = None
+
+        for pattern in (
+            r"Terms\s+and\s+Conditions",
+            r"conditions\s+(?:g[ée]n[ée]rales|d['’]utilisation)",
+            r"accept.*terms",
+        ):
+            loc = form.get_by_label(re.compile(pattern, re.I))
+            if await loc.count():
+                candidate = loc.first
+                try:
+                    if await candidate.is_visible():
+                        checkbox = candidate
+                        break
+                except Exception:
+                    pass
+
+        if checkbox is None:
+            boxes = form.locator('input[type="checkbox"]:visible')
+            if await boxes.count() == 1:
+                checkbox = boxes.first
+            elif await boxes.count() > 1:
+                # Try to find the checkbox immediately associated with text
+                # containing Terms and Conditions.
+                labels = form.locator("label")
+                for i in range(await labels.count()):
+                    label = labels.nth(i)
+                    text = (await label.inner_text()).strip().lower()
+                    if "terms" in text and "condition" in text:
+                        nested = label.locator('input[type="checkbox"]')
+                        if await nested.count():
+                            checkbox = nested.first
+                            break
+
+        if checkbox is None:
+            raise ManualIntervention("Checkbox de Terms and Conditions não encontrada.")
+
+        if not await checkbox.is_checked():
+            await checkbox.check()
+
+        if not await checkbox.is_checked():
+            raise ManualIntervention("Não foi possível confirmar Terms and Conditions.")
+
+    async def submit_registration(self, page: Page, form: Locator) -> None:
+        button = await self._find_register_button(form)
+        if button is None:
+            raise ManualIntervention("Botão final Register não encontrado.")
+
+        await button.click()
+
+        # Give normal navigation/XHR a chance to complete. A timeout here is
+        # not itself a reason to resubmit, because duplicate submission is more
+        # dangerous than escalating for review.
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=12_000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1_000)
+        await self._detect_protection(page)
+
+    async def _confirm_registration_advanced(self, page: Page) -> None:
+        """
+        Confirm that the site left the registration form after submission.
+
+        We intentionally do not click Register a second time when the result is
+        ambiguous. That prevents duplicate submissions.
+        """
+        for _ in range(20):
+            form = await self._registration_form(page)
+            if form is None:
+                return
+
+            if "/users/register" not in page.url.lower():
+                return
+
+            await page.wait_for_timeout(400)
+
+        body = ""
+        try:
+            body = (await page.locator("body").inner_text()).strip()
+        except Exception:
+            pass
+
+        lowered = body.lower()
+        conflict_markers = (
+            "already in use",
+            "already used",
+            "already exists",
+            "username is taken",
+            "username already",
+            "nom d'utilisateur est déjà",
+            "nom d’utilisateur est déjà",
+            "pseudo est déjà",
+            "pseudo déjà utilisé",
+            "utilisateur existe déjà",
+        )
+        if any(marker in lowered for marker in conflict_markers):
+            raise ManualIntervention(
+                "O site recusou o cadastro porque o username/login aparenta já estar em uso."
+            )
+
+        raise ManualIntervention(
+            "Register foi enviado, mas o formulário continuou visível; "
+            "não foi possível confirmar automaticamente que a conta foi criada."
+        )
+
+    async def _registration_form(self, page: Page) -> Locator | None:
+        register_button = await self._find_register_button(page)
+        if register_button is not None:
+            form = register_button.locator("xpath=ancestor::form[1]")
+            if await form.count():
+                return form.first
+
+        forms = page.locator("form")
+        for i in range(await forms.count()):
+            form = forms.nth(i)
+            try:
+                if not await form.is_visible():
+                    continue
+            except Exception:
+                continue
+
+            passwords = form.locator('input[type="password"]')
+            if await passwords.count() >= 2:
+                return form
+        return None
+
+    async def _find_register_button(self, scope: Page | Locator) -> Locator | None:
+        candidates = [
+            scope.get_by_role("button", name=re.compile(r"Register!?", re.I)),
+            scope.locator('input[type="submit"][value*="Register" i]'),
+            scope.locator('input[type="button"][value*="Register" i]'),
+        ]
+        for loc in candidates:
+            for i in range(await loc.count()):
+                candidate = loc.nth(i)
+                try:
+                    if await candidate.is_visible():
+                        return candidate
+                except Exception:
+                    pass
+        return None
+
+    async def _find_age_gate_checkbox(self, popup: Locator | Page, page: Page) -> Locator | None:
+        """Find the +18 authorization checkbox even when legacy CSS hides the input."""
+        # Give the checkbox/label its own readiness window because the popup can
+        # render in stages on this slow site.
+        for _ in range(48):
+            # First choice: a checkbox inside the popup root, visible or hidden.
+            boxes = popup.locator('input[type="checkbox"]')
+            count = await boxes.count()
+            if count == 1:
+                return boxes.first
+            if count > 1:
+                for i in range(count):
+                    box = boxes.nth(i)
+                    meta = await self._element_meta(
+                        box, ("name", "id", "value", "title", "aria-label")
+                    )
+                    if any(k in meta for k in ("term", "condition", "agree", "accord", "certif", "age", "majeur")):
+                        return box
+
+            # Labels observed around this control contain terms/conditions and
+            # an explicit declaration of agreement. get_by_label can resolve a
+            # hidden native input when the visible label is what the user sees.
+            for pattern in (
+                r"terms\s+and\s+conditions",
+                r"je\s+certifie.*accord",
+                r"j['’]?ai\s+lu.*terms",
+                r"conditions.*(?:accord|accept)",
+            ):
+                loc = popup.get_by_label(re.compile(pattern, re.I))
+                for i in range(await loc.count()):
+                    candidate = loc.nth(i)
+                    try:
+                        if (await candidate.get_attribute("type") or "").lower() == "checkbox":
+                            return candidate
+                    except Exception:
+                        pass
+
+            await page.wait_for_timeout(250)
+        return None
+
+    async def _check_age_gate_authorization(self, checkbox: Locator, page: Page) -> None:
+        try:
+            if await checkbox.is_checked():
+                return
+        except Exception:
+            pass
+
+        try:
+            if await checkbox.is_visible():
+                await checkbox.check(timeout=3_000)
+                if await checkbox.is_checked():
+                    return
+        except Exception:
+            pass
+
+        # Legacy pages often hide the native checkbox but keep a visible label.
+        # Clicking the label is preferable to forcing a click on a zero-size input.
+        labels: list[Locator] = []
+        ancestor = checkbox.locator("xpath=ancestor::label[1]")
+        if await ancestor.count():
+            labels.append(ancestor.first)
+
+        checkbox_id = await checkbox.get_attribute("id")
+        if checkbox_id:
+            labels.append(page.locator(f'label[for="{checkbox_id}"]').first)
+
+        for label in labels:
+            try:
+                if await label.count() and await label.is_visible():
+                    await label.click(timeout=3_000)
+                    await page.wait_for_timeout(150)
+                    if await checkbox.is_checked():
+                        return
+            except Exception:
+                pass
+
+        raise ManualIntervention("Não foi possível marcar a confirmação do popup +18.")
+
+    async def _find_visible_ok_button(self, page: Page) -> Locator | None:
+        candidates = [
+            page.get_by_role("button", name=re.compile(r"^\s*OK\s*$", re.I)),
+            page.locator('input[type="submit"][value="OK" i]'),
+            page.locator('input[type="button"][value="OK" i]'),
+            page.get_by_text(re.compile(r"^\s*OK\s*$", re.I), exact=True),
+        ]
+        for loc in candidates:
+            for i in range(await loc.count()):
+                candidate = loc.nth(i)
+                try:
+                    if await candidate.is_visible():
+                        return candidate
+                except Exception:
+                    pass
+        return None
+
+    async def _choose_member(self, form: Locator) -> None:
+        for pattern in (r"^Member$", r"^Membre$", r"Member"):
+            loc = form.get_by_label(re.compile(pattern, re.I))
+            if await loc.count():
+                try:
+                    if await loc.first.is_visible():
+                        await loc.first.check()
+                        return
+                except Exception:
+                    pass
+
+        radios = form.locator('input[type="radio"]:visible')
+        count = await radios.count()
+        if count >= 2:
+            # Public registration currently presents Escorte first and Member
+            # second. Use this only as a fallback when labels are not wired.
+            await radios.nth(1).check()
+            return
+
+        # Some registration variants are already Member-specific and do not
+        # display account-type radios. In that case there is nothing to choose.
+        return
+
+    async def _fill_text(
+        self,
+        form: Locator,
+        labels: list[str],
+        keywords: list[str],
+        value: str,
+        *,
+        required: bool = True,
+    ) -> bool:
+        for label in labels:
+            loc = form.get_by_label(re.compile(label, re.I))
+            if await loc.count():
+                candidate = loc.first
+                try:
+                    if await candidate.is_visible():
+                        await candidate.fill(str(value))
+                        return True
+                except Exception:
+                    pass
+
+        inputs = form.locator(
+            'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="password"])'
+        )
+        for i in range(await inputs.count()):
+            loc = inputs.nth(i)
+            try:
+                if not await loc.is_visible():
+                    continue
+            except Exception:
+                continue
+
+            meta = await self._element_meta(
+                loc,
+                ("name", "id", "placeholder", "title", "aria-label", "type"),
+            )
+            if any(k.lower() in meta for k in keywords):
+                await loc.fill(str(value))
+                return True
+
+        if required:
+            raise ManualIntervention(f"Campo não encontrado: {labels[0]}")
+        return False
+
+    async def _select_country_france(self, form: Locator, *, required: bool = True) -> bool:
+        selects = form.locator("select:visible")
+        count = await selects.count()
+        if not count:
+            if required:
+                raise ManualIntervention("Nenhum select encontrado no formulário.")
+            return False
+
+        country = None
+        for i in range(count):
+            loc = selects.nth(i)
+            meta = await self._element_meta(
+                loc,
+                ("name", "id", "title", "aria-label"),
+            )
+            if "country" in meta or "pays" in meta:
+                country = loc
+                break
+
+        if country is None:
+            # Do not guess that the first select is country: in the classic form
+            # the first select is the birth day.
+            if required:
+                raise ManualIntervention("Campo de país não encontrado.")
+            return False
+
+        options = country.locator("option")
+        for i in range(await options.count()):
+            opt = options.nth(i)
+            text = (await opt.inner_text()).strip().lower()
+            if text == "france" or "france" in text:
+                value = await opt.get_attribute("value")
+                if value is not None:
+                    await country.select_option(value=value)
+                else:
+                    await country.select_option(label=(await opt.inner_text()).strip())
+                return True
+
+        if required:
+            raise ManualIntervention("Opção France não encontrada no campo de país.")
+        return False
+
+    async def _fill_birth_date(self, form: Locator, birth_date: str) -> None:
+        dt = datetime.strptime(birth_date, "%Y-%m-%d")
+        selects = form.locator("select:visible")
+        count = await selects.count()
+
+        found: dict[str, Locator] = {}
+        for i in range(count):
+            loc = selects.nth(i)
+            meta = await self._element_meta(
+                loc,
+                ("name", "id", "title", "aria-label"),
+            )
+            if any(k in meta for k in ("day", "jour")):
+                found["day"] = loc
+            elif any(k in meta for k in ("month", "mois")):
+                found["month"] = loc
+            elif any(k in meta for k in ("year", "annee", "année")):
+                found["year"] = loc
+
+        if len(found) < 3:
+            candidates = []
+            for i in range(count):
+                loc = selects.nth(i)
+                meta = await self._element_meta(
+                    loc,
+                    ("name", "id", "title", "aria-label"),
+                )
+                if "country" not in meta and "pays" not in meta:
+                    candidates.append(loc)
+
+            if len(candidates) >= 3:
+                # Both observed registration variants order DOB as
+                # day / month / year.
+                found = {
+                    "day": candidates[-3],
+                    "month": candidates[-2],
+                    "year": candidates[-1],
+                }
+
+        if len(found) < 3:
+            raise ManualIntervention("Não consegui identificar os 3 campos da data de nascimento.")
+
+        await self._select_numeric(found["day"], dt.day, kind="day")
+        await self._select_numeric(found["month"], dt.month, kind="month")
+        await self._select_numeric(found["year"], dt.year, kind="year")
+
+    async def _select_numeric(self, select: Locator, number: int, kind: str) -> None:
+        month_names = {
+            1: ("january", "janvier"),
+            2: ("february", "février", "fevrier"),
+            3: ("march", "mars"),
+            4: ("april", "avril"),
+            5: ("may", "mai"),
+            6: ("june", "juin"),
+            7: ("july", "juillet"),
+            8: ("august", "août", "aout"),
+            9: ("september", "septembre"),
+            10: ("october", "octobre"),
+            11: ("november", "novembre"),
+            12: ("december", "décembre", "decembre"),
+        }
+
+        options = select.locator("option")
+        for i in range(await options.count()):
+            opt = options.nth(i)
+            text = (await opt.inner_text()).strip().lower()
+            value = (await opt.get_attribute("value") or "").strip().lower()
+
+            numeric_matches = {str(number), f"{number:02d}"}
+            ok = text in numeric_matches or value in numeric_matches
+            if kind == "month":
+                ok = ok or any(name in text for name in month_names[number])
+
+            if ok:
+                raw_value = await opt.get_attribute("value")
+                if raw_value is not None:
+                    await select.select_option(value=raw_value)
+                else:
+                    await select.select_option(label=(await opt.inner_text()).strip())
+                return
+
+        raise ManualIntervention(f"Não consegui selecionar {kind}={number}.")
+
+
+
+    @staticmethod
+    def normalize_city_for_search(value: str) -> str:
+        """Normalize only for autocomplete search/matching; never mutates DB data."""
+        value = (value or "").strip()
+
+        # Hyphens/dashes become spaces for easier autocomplete matching.
+        value = re.sub(r"[-‐-‒–—]+", " ", value)
+
+        # Preserve cedilla: MesLibertines autocomplete may require ç.
+        value = value.replace("ç", "__CEDILLA_LOWER__")
+        value = value.replace("Ç", "__CEDILLA_UPPER__")
+
+        # Remove other accents/diacritics.
+        decomposed = unicodedata.normalize("NFKD", value)
+        without_marks = "".join(
+            ch for ch in decomposed
+            if not unicodedata.combining(ch)
+        )
+
+        # Restore cedilla after normalization.
+        without_marks = without_marks.replace("__CEDILLA_LOWER__", "ç")
+        without_marks = without_marks.replace("__CEDILLA_UPPER__", "Ç")
+
+        return re.sub(r"\\s+", " ", without_marks).strip().lower()
+
+    async def complete_member_profile(self, page: Page, member: dict, password: str) -> None:
+        """
+        Log in and complete only the two authorized profile fields:
+        gender=homme and Ville=member.city_france. No other profile fields are edited.
+        After persistence is re-read and validated, log out before the context closes.
+        """
+        await self.login_member(page, member, password)
+        profile = await self.open_profile_editor(page, member)
+        await self._select_profile_gender_homme(profile)
+        await self._select_profile_city(page, profile, member["city_france"])
+
+        # A late +18 modal must never be allowed to sit on top of Enregistrer.
+        await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=3_000)
+        await self._detect_protection(page)
+
+        save = await self._find_profile_save_button(page)
+        if save is None:
+            raise ManualIntervention("Botão Enregistrer não encontrado na edição do perfil.")
+        await save.click()
+
+        # Never click Enregistrer twice on an ambiguous response.
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1_200)
+        await self._detect_protection(page)
+
+        # Validate persistence from a fresh GET rather than trusting the edited DOM.
+        await page.goto(self.HOME_URL, wait_until="domcontentloaded", timeout=45_000)
+        await page.wait_for_timeout(800)
+        await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=5_000)
+        await self._detect_protection(page)
+
+        if not await self._is_logged_in(page, member["username"]):
+            raise ManualIntervention(
+                "Após Enregistrer, a sessão não permaneceu autenticada; não foi possível validar o perfil."
+            )
+
+        profile = await self.open_profile_editor(page, member)
+        if not await self._profile_gender_is_homme(profile):
+            raise ManualIntervention("O site não persistiu Je suis = homme.")
+
+        city_input = await self._find_profile_city_input(profile)
+        if city_input is None:
+            raise ManualIntervention("Campo Ville não encontrado ao validar o perfil salvo.")
+        saved_city = (await city_input.input_value()).strip()
+        if self.normalize_city_for_search(saved_city) != self.normalize_city_for_search(member["city_france"]):
+            raise ManualIntervention(
+                f"A cidade salva não corresponde ao membro: esperado '{member['city_france']}', recebido '{saved_city}'."
+            )
+
+        # The profile is now persisted and independently validated. Only now do
+        # we log out; PROFILE_COMPLETE is recorded by the caller after this
+        # method returns successfully.
+        await self.logout_member(page, member)
+
+    async def login_member(self, page: Page, member: dict, password: str) -> None:
+        await page.goto(self.HOME_URL, wait_until="domcontentloaded", timeout=45_000)
+        await page.wait_for_timeout(1_000)
+        await self._detect_protection(page)
+
+        # Initial long window: popup may be injected late on a fresh context.
+        await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=10_000)
+        await self._detect_protection(page)
+
+        if await self._is_logged_in(page, member["username"]):
+            return
+
+        await self._open_login_dialog(page, member)
+        username_input = await self._find_login_username_input(page)
+        password_input = await self._find_login_password_input(page)
+        if username_input is None or password_input is None:
+            raise ManualIntervention("Campos de login não encontrados em Se connecter.")
+
+        await username_input.fill(member["username"])
+        await password_input.fill(password)
+
+        # Quick late-popup guard immediately before the critical click.
+        late_gate = await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=1_000)
+        if late_gate:
+            # Closing the +18 popup may also have closed/obscured the login modal.
+            await self._open_login_dialog(page, member)
+            username_input = await self._find_login_username_input(page)
+            password_input = await self._find_login_password_input(page)
+            if username_input is None or password_input is None:
+                raise ManualIntervention("O login não reapareceu após fechar o popup +18.")
+            await username_input.fill(member["username"])
+            await password_input.fill(password)
+
+        button = await self._find_login_submit_button(page)
+        if button is None:
+            raise ManualIntervention("Botão Connectez-vous não encontrado.")
+        await button.click()
+
+        for _ in range(40):
+            await page.wait_for_timeout(500)
+            await self._detect_protection(page)
+            if await self._is_logged_in(page, member["username"]):
+                return
+
+        body = ""
+        try:
+            body = (await page.locator("body").inner_text()).lower()
+        except Exception:
+            pass
+        if any(x in body for x in ("mot de passe incorrect", "identifiant incorrect", "connexion incorrecte")):
+            raise ManualIntervention("O site recusou o username ou a senha.")
+        raise ManualIntervention("Não foi possível confirmar o login dentro do tempo esperado.")
+
+    async def _open_login_dialog(self, page: Page, member: dict) -> None:
+        # It may already be open.
+        if await self._find_login_password_input(page) is not None:
+            return
+
+        for attempt in range(2):
+            connect = page.get_by_text(re.compile(r"^\s*SE CONNECTER\s*$", re.I), exact=True)
+            clicked = False
+            for i in range(await connect.count()):
+                item = connect.nth(i)
+                try:
+                    if await item.is_visible():
+                        await item.click()
+                        clicked = True
+                        break
+                except Exception:
+                    pass
+
+            if not clicked:
+                links = page.locator("a:visible")
+                for i in range(await links.count()):
+                    item = links.nth(i)
+                    try:
+                        text = (await item.inner_text()).strip()
+                    except Exception:
+                        continue
+                    if re.fullmatch(r"se connecter", text, re.I):
+                        await item.click()
+                        clicked = True
+                        break
+
+            if not clicked:
+                raise ManualIntervention("Opção SE CONNECTER não encontrada.")
+
+            for _ in range(30):
+                await page.wait_for_timeout(500)
+                if await self._find_login_password_input(page) is not None:
+                    return
+
+            # If a very late age popup blocked the first click, resolve it and retry once.
+            if await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=2_000):
+                continue
+            break
+
+        raise ManualIntervention("A janela de login não apareceu dentro do tempo esperado.")
+
+    async def _find_login_username_input(self, page: Page) -> Locator | None:
+        for pattern in (r"Nom d['’]utilisateur", r"Username", r"Utilisateur"):
+            loc = page.get_by_label(re.compile(pattern, re.I))
+            for i in range(await loc.count()):
+                item = loc.nth(i)
+                try:
+                    if await item.is_visible():
+                        return item
+                except Exception:
+                    pass
+
+        inputs = page.locator('input:not([type="hidden"]):not([type="password"]):visible')
+        for i in range(await inputs.count()):
+            item = inputs.nth(i)
+            meta = await self._element_meta(item, ("name", "id", "placeholder", "title", "aria-label"))
+            if any(k in meta for k in ("user", "login", "pseudo", "utilisateur")):
+                return item
+        return None
+
+    async def _find_login_password_input(self, page: Page) -> Locator | None:
+        loc = page.locator('input[type="password"]:visible')
+        if await loc.count():
+            return loc.first
+        return None
+
+    async def _find_login_submit_button(self, page: Page) -> Locator | None:
+        candidates = [
+            page.get_by_role("button", name=re.compile(r"^\s*Connectez-vous\s*$", re.I)),
+            page.locator('input[type="submit"][value*="Connectez" i]'),
+            page.locator('input[type="button"][value*="Connectez" i]'),
+            page.get_by_text(re.compile(r"^\s*Connectez-vous\s*$", re.I), exact=True),
+        ]
+        for loc in candidates:
+            for i in range(await loc.count()):
+                item = loc.nth(i)
+                try:
+                    if await item.is_visible():
+                        return item
+                except Exception:
+                    pass
+        return None
+
+    async def _is_logged_in(self, page: Page, username: str) -> bool:
+        try:
+            text = (await page.locator("body").inner_text()).lower()
+        except Exception:
+            return False
+        normalized_user = (username or "").lower()
+        has_private_marker = (
+            "dans votre espace privé" in text
+            or "dans votre espace prive" in text
+            or "déconnexion" in text
+            or "deconnexion" in text
+        )
+        return has_private_marker and (normalized_user in text or "déconnexion" in text or "deconnexion" in text)
+
+    async def logout_member(self, page: Page, member: dict) -> None:
+        """Log out after profile validation and confirm that the authenticated session ended."""
+        # A late +18 popup can also obstruct the account menu.
+        await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=2_500)
+
+        if not await self._is_logged_in(page, member["username"]):
+            return
+
+        async def find_logout() -> Locator | None:
+            patterns = (
+                r"^\s*Déconnexion\s*$",
+                r"^\s*Deconnexion\s*$",
+                r"^\s*Déconnexion\s+.+$",
+                r"^\s*Deconnexion\s+.+$",
+            )
+            for pattern in patterns:
+                loc = page.get_by_text(re.compile(pattern, re.I), exact=True)
+                for i in range(await loc.count()):
+                    item = loc.nth(i)
+                    try:
+                        if await item.is_visible():
+                            return item
+                    except Exception:
+                        pass
+            links = page.locator("a:visible")
+            for i in range(await links.count()):
+                item = links.nth(i)
+                try:
+                    text = (await item.inner_text()).strip()
+                except Exception:
+                    continue
+                if re.match(r"^\s*d[ée]connexion(?:\s|$)", text, re.I):
+                    return item
+            return None
+
+        logout = await find_logout()
+        if logout is None:
+            # On the observed UI the logout action can be inside the MON PROFIL
+            # hover menu. Hover once and look again.
+            menu = page.get_by_text(re.compile(r"MON\s+PROFIL", re.I))
+            best_menu = None
+            best_len = 10_000
+            for i in range(await menu.count()):
+                item = menu.nth(i)
+                try:
+                    if not await item.is_visible():
+                        continue
+                    label = (await item.inner_text()).strip()
+                    if "mon profil" not in label.lower():
+                        continue
+                    if len(label) < best_len:
+                        best_menu = item
+                        best_len = len(label)
+                except Exception:
+                    pass
+            if best_menu is not None:
+                try:
+                    await best_menu.hover()
+                    await page.wait_for_timeout(700)
+                except Exception:
+                    pass
+            logout = await find_logout()
+
+        if logout is None:
+            raise ManualIntervention("Perfil validado, mas a opção Déconnexion não foi encontrada.")
+
+        await logout.click()
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=12_000)
+        except Exception:
+            pass
+
+        # Confirm logout without requiring the login button to be visible; a
+        # post-logout +18 popup may cover it. The important condition is that
+        # the private/logged-in markers disappear.
+        for _ in range(40):
+            await page.wait_for_timeout(300)
+            if not await self._is_logged_in(page, member["username"]):
+                return
+
+        raise ManualIntervention("Déconnexion foi acionado, mas a sessão continuou autenticada.")
+
+    async def open_profile_editor(self, page: Page, member: dict) -> Locator | Page:
+        await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=1_000)
+
+        for attempt in range(2):
+            links = page.get_by_text(re.compile(r"^\s*Modifier le profil\s*$", re.I), exact=True)
+            for i in range(await links.count()):
+                item = links.nth(i)
+                try:
+                    if await item.is_visible():
+                        await item.click()
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(700)
+                        await self.accept_initial_age_gate(page, member["birth_date"], wait_ms=1_500)
+                        await self._detect_protection(page)
+                        scope = await self._profile_scope(page)
+                        if scope is not None:
+                            return scope
+                except Exception:
+                    pass
+
+            # Fallback: hover MON PROFIL to reveal the menu, then retry.
+            menu = page.get_by_text(re.compile(r"^\s*MON PROFIL\s*$", re.I), exact=True)
+            hovered = False
+            for i in range(await menu.count()):
+                item = menu.nth(i)
+                try:
+                    if await item.is_visible():
+                        await item.hover()
+                        hovered = True
+                        await page.wait_for_timeout(500)
+                        break
+                except Exception:
+                    pass
+            if not hovered:
+                break
+
+        raise ManualIntervention("Não foi possível abrir Modifier le profil.")
+
+    async def _profile_scope(self, page: Page) -> Locator | Page | None:
+        save = await self._find_profile_save_button(page)
+        if save is None:
+            return None
+        form = save.locator("xpath=ancestor::form[1]")
+        if await form.count():
+            return form.first
+        return page
+
+    async def _find_profile_save_button(self, page: Page) -> Locator | None:
+        candidates = [
+            page.get_by_role("button", name=re.compile(r"^\s*Enregistrer\s*$", re.I)),
+            page.locator('input[type="submit"][value="Enregistrer" i]'),
+            page.locator('input[type="button"][value="Enregistrer" i]'),
+            page.get_by_text(re.compile(r"^\s*Enregistrer\s*$", re.I), exact=True),
+        ]
+        for loc in candidates:
+            for i in range(await loc.count()):
+                item = loc.nth(i)
+                try:
+                    if await item.is_visible():
+                        return item
+                except Exception:
+                    pass
+        return None
+
+    async def _select_profile_gender_homme(self, scope: Locator | Page) -> None:
+        # MesLibertines uses a custom radio: the native input is hidden inside
+        # span.mcf-fake-radio. Select the exact observed semantic value instead
+        # of relying on visibility or visual position.
+        homme = scope.locator('input[type="radio"][name="data[gender]"][value="m"]')
+        if await homme.count() == 1:
+            radio = homme.first
+            try:
+                if await radio.is_checked():
+                    return
+            except Exception:
+                pass
+
+            # Observed on the live site: clicking the hidden native input itself
+            # does NOT toggle checked. The site's mcf-radio widget listens on the
+            # visible parent span.mcf-fake-radio. Click that wrapper first.
+            try:
+                wrapper = radio.locator("xpath=parent::*[contains(concat(' ', normalize-space(@class), ' '), ' mcf-fake-radio ')]")
+                if await wrapper.count() == 1:
+                    await wrapper.first.click(timeout=3_000)
+                    await radio.page.wait_for_timeout(150)
+                    if await radio.is_checked():
+                        return
+            except Exception:
+                pass
+
+            # Fallback: dispatch the same DOM click on the parent wrapper. This is
+            # useful if the wrapper is technically present but Playwright considers
+            # it non-actionable due to legacy layout/CSS.
+            try:
+                await radio.evaluate("el => el.parentElement && el.parentElement.click()")
+                await radio.page.wait_for_timeout(150)
+                if await radio.is_checked():
+                    return
+            except Exception:
+                pass
+
+            # Last-resort compatibility path. Never continue unless checked=true.
+            try:
+                await radio.check(force=True)
+                if await radio.is_checked():
+                    return
+            except Exception:
+                pass
+
+        raise ManualIntervention(
+            "Não consegui selecionar Je suis = homme com segurança (esperado data[gender]=m)."
+        )
+
+    async def _profile_gender_is_homme(self, scope: Locator | Page) -> bool:
+        try:
+            homme = scope.locator('input[type="radio"][name="data[gender]"][value="m"]')
+            if await homme.count() == 1 and await homme.first.is_checked():
+                return True
+        except Exception:
+            pass
+
+        try:
+            loc = scope.get_by_label(re.compile(r"^\s*homme\s*$", re.I))
+            for i in range(await loc.count()):
+                item = loc.nth(i)
+                if await item.is_visible() and await item.is_checked():
+                    return True
+        except Exception:
+            pass
+
+        radios = scope.locator('input[type="radio"]:visible')
+        for i in range(await radios.count()):
+            radio = radios.nth(i)
+            meta = await self._element_meta(radio, ("value", "name", "id", "title", "aria-label"))
+            if ("homme" in meta or re.search(r"(?:^|\s)male(?:\s|$)", meta)) and await radio.is_checked():
+                return True
+
+        if await radios.count() == 4:
+            try:
+                page_text = (await self._scope_inner_text(scope)).lower()
+                if all(word in page_text for word in ("homme", "femme", "couple", "trans")):
+                    return await radios.nth(0).is_checked()
+            except Exception:
+                pass
+        return False
+
+    async def _find_profile_city_input(self, scope: Locator | Page) -> Locator | None:
+        for pattern in (r"^\s*Ville\s*: ?$", r"^\s*Ville\s*$", r"City"):
+            loc = scope.get_by_label(re.compile(pattern, re.I))
+            for i in range(await loc.count()):
+                item = loc.nth(i)
+                try:
+                    if await item.is_visible():
+                        return item
+                except Exception:
+                    pass
+
+        inputs = scope.locator('input[type="text"]:visible, input[type="search"]:visible, input:not([type]):visible')
+        for i in range(await inputs.count()):
+            item = inputs.nth(i)
+            meta = await self._element_meta(item, ("name", "id", "placeholder", "title", "aria-label"))
+            if "ville" in meta or "city" in meta:
+                return item
+
+        # Geometry fallback for legacy labels without a for= attribute.
+        labels = scope.get_by_text(re.compile(r"^\s*Ville\s*: ?$", re.I), exact=True)
+        label_box = None
+        for i in range(await labels.count()):
+            item = labels.nth(i)
+            try:
+                if await item.is_visible():
+                    label_box = await item.bounding_box()
+                    if label_box:
+                        break
+            except Exception:
+                pass
+        if label_box:
+            best = None
+            best_distance = 10_000.0
+            for i in range(await inputs.count()):
+                item = inputs.nth(i)
+                box = await item.bounding_box()
+                if not box:
+                    continue
+                dx = max(0.0, box["x"] - (label_box["x"] + label_box["width"]))
+                dy = abs((box["y"] + box["height"] / 2) - (label_box["y"] + label_box["height"] / 2))
+                distance = dx + dy
+                if distance < best_distance and dy < 60:
+                    best = item
+                    best_distance = distance
+            if best is not None:
+                return best
+        return None
+
+    async def _select_profile_city(self, page: Page, scope: Locator | Page, city: str) -> str:
+        city_input = await self._find_profile_city_input(scope)
+        if city_input is None:
+            raise ManualIntervention("Campo Ville não encontrado.")
+
+        target = self.normalize_city_for_search(city)
+        if not target:
+            raise ManualIntervention("Cidade do membro está vazia.")
+
+        # Trigger the site's old autocomplete with real keyboard events.
+        await city_input.click()
+        await city_input.fill("")
+        await city_input.type(target, delay=65)
+
+        input_box = await city_input.bounding_box()
+        if not input_box:
+            raise ManualIntervention("Não consegui localizar visualmente o campo Ville.")
+
+        selected_text = None
+        for _ in range(40):  # up to ~10 seconds for slow autocomplete
+            await page.wait_for_timeout(250)
+            candidates = page.locator('li:visible, [role="option"]:visible, .autocomplete-suggestion:visible, .ui-menu-item:visible, .ac_results li:visible, .autocomplete-suggestions > div:visible')
+            best = None
+            best_distance = 10_000.0
+            best_text = None
+            for i in range(await candidates.count()):
+                item = candidates.nth(i)
+                try:
+                    text = (await item.inner_text()).strip()
+                except Exception:
+                    continue
+                if self.normalize_city_for_search(text) != target:
+                    continue
+                box = await item.bounding_box()
+                if not box:
+                    continue
+                # Restrict to the dropdown physically near/below Ville so a
+                # same-named navigation item elsewhere cannot be clicked.
+                input_bottom = input_box["y"] + input_box["height"]
+                vertical = box["y"] - input_bottom
+                horizontal_overlap = (
+                    box["x"] < input_box["x"] + input_box["width"] + 250
+                    and box["x"] + box["width"] > input_box["x"] - 80
+                )
+                if not horizontal_overlap or vertical < -10 or vertical > 500:
+                    continue
+                distance = abs(vertical) + abs(box["x"] - input_box["x"]) * 0.1
+                if distance < best_distance:
+                    best = item
+                    best_distance = distance
+                    best_text = text
+
+            if best is not None:
+                await best.click()
+                selected_text = best_text
+                await page.wait_for_timeout(350)
+                break
+
+        if selected_text is None:
+            raise ManualIntervention(
+                f"Autocomplete de Ville não ofereceu correspondência exata para '{city}' usando busca '{target}'."
+            )
+
+        current = (await city_input.input_value()).strip()
+        if self.normalize_city_for_search(current) != target:
+            raise ManualIntervention(
+                f"A sugestão de cidade foi clicada, mas Ville ficou como '{current}' em vez de '{city}'."
+            )
+        return selected_text
+
+    async def _scope_inner_text(self, scope: Locator | Page) -> str:
+        if isinstance(scope, Page):
+            return await scope.locator("body").inner_text()
+        return await scope.inner_text()
+
+    async def _element_meta(self, loc: Locator, attrs: tuple[str, ...]) -> str:
+        parts: list[str] = []
+        for attr in attrs:
+            parts.append(await loc.get_attribute(attr) or "")
+        return " ".join(parts).lower()
+
+    async def _detect_protection(self, page: Page) -> None:
+        try:
+            text = (await page.locator("body").inner_text()).lower()
+        except Exception:
+            return
+
+        suspicious = [
+            "captcha",
+            "cloudflare",
+            "too many requests",
+            "rate limit",
+            "verify you are human",
+            "vérifiez que vous êtes humain",
+            "verifiez que vous etes humain",
+            "access denied",
+        ]
+        for marker in suspicious:
+            if marker in text:
+                raise ManualIntervention(f"Proteção/verificação detectada: {marker}")

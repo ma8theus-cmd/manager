@@ -1,0 +1,114 @@
+\
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MesLibertines Manager</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, Arial, sans-serif; margin: 0; background:#f5f6f8; color:#1d2433; }
+    .wrap { max-width: 1500px; margin: 0 auto; padding: 24px; }
+    h1 { margin-top: 0; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin:18px 0; }
+    .card { background:white; padding:16px; border-radius:12px; box-shadow:0 1px 5px #0001; }
+    .num { font-size:28px; font-weight:700; }
+    .label { font-size:13px; opacity:.7; }
+    .toolbar { background:white; padding:16px; border-radius:12px; margin-bottom:16px; display:flex; gap:12px; align-items:center; }
+    button { border:0; border-radius:8px; padding:10px 14px; cursor:pointer; font-weight:650; }
+    .primary { background:#1f65d6; color:white; }
+    .ok { background:#14804a; color:white; }
+    .warn { background:#d98b09; color:white; }
+    .secondary { background:#e9edf3; color:#1d2433; }
+    .disabled { opacity:.45; cursor:not-allowed; }
+    table { width:100%; border-collapse:collapse; background:white; border-radius:12px; overflow:hidden; }
+    th,td { padding:11px 10px; border-bottom:1px solid #edf0f4; text-align:left; vertical-align:top; font-size:14px; }
+    th { background:#f0f3f8; position:sticky; top:0; }
+    .status { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef2f7; font-size:12px; font-weight:700; }
+    .msg { padding:12px; border-radius:8px; margin:12px 0; background:#e8f7ee; }
+    .error { padding:12px; border-radius:8px; margin:12px 0; background:#fdeaea; color:#8f2020; }
+    form { display:inline; }
+    small { opacity:.68; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Painel central</h1>
+  <p>Cadastro preparado automaticamente; aceite dos termos e envio final permanecem manuais.</p>
+
+  {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  <div class="cards">
+    <div class="card"><div class="num">{{ data.total }}</div><div class="label">Total de membros</div></div>
+    <div class="card"><div class="num">{{ data.pending }}</div><div class="label">Pendentes</div></div>
+    <div class="card"><div class="num">{{ data.selected_today }} / {{ data.limit }}</div><div class="label">Selecionados hoje</div></div>
+    <div class="card"><div class="num">{{ data.prepared }}</div><div class="label">Formulários preparados</div></div>
+    <div class="card"><div class="num">{{ data.waiting_email }}</div><div class="label">Aguardando email</div></div>
+    <div class="card"><div class="num">{{ data.email_confirmed }}</div><div class="label">Emails confirmados</div></div>
+    <div class="card"><div class="num">{{ data.manual }}</div><div class="label">Intervenção manual</div></div>
+    <div class="card"><div class="num">{{ data.profile_complete }}</div><div class="label">Perfis completos</div></div>
+  </div>
+
+  <div class="toolbar">
+    <form method="post" action="/prepare-batch">
+      <button class="primary" type="submit">Preparar contas do lote de hoje</button>
+    </form>
+    <small>O limite diário está no .env. A primeira execução pode ser testada alterando DAILY_ACCOUNT_LIMIT=1.</small>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Membro</th>
+        <th>Username</th>
+        <th>Email</th>
+        <th>Cadastro</th>
+        <th>Email</th>
+        <th>Perfil</th>
+        <th>Último erro</th>
+        <th>Ações</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for m in data.members %}
+      <tr>
+        <td>#{{ "%03d"|format(m.id) }}</td>
+        <td>{{ m.first_name }} {{ m.last_name }}<br><small>{{ m.birth_date }} · {{ m.city_france }}</small></td>
+        <td>{{ m.username or "—" }}</td>
+        <td>{{ m.email or "—" }}</td>
+        <td><span class="status">{{ m.registration_status }}</span></td>
+        <td><span class="status">{{ m.email_status }}</span></td>
+        <td><span class="status">{{ m.profile_status }}</span></td>
+        <td><small>{{ m.last_error or "—" }}</small></td>
+        <td>
+          {% if m.registration_status in ["FORM_PREPARED", "MANUAL_INTERVENTION"] %}
+            <form method="post" action="/members/{{ m.id }}/account-created">
+              <button class="ok" type="submit">✓ Conta criada</button>
+            </form>
+          {% endif %}
+
+          {% if m.registration_status == "WAITING_EMAIL_CONFIRMATION" %}
+            <form method="post" action="/members/{{ m.id }}/email-confirmed">
+              <button class="ok" type="submit">✓ Email confirmado</button>
+            </form>
+          {% endif %}
+
+          {% if m.registration_status in ["SELECTED", "FORM_PREPARING", "MANUAL_INTERVENTION"] %}
+            <form method="post" action="/members/{{ m.id }}/reset">
+              <button class="secondary" type="submit">Voltar a PENDING</button>
+            </form>
+          {% endif %}
+
+          {% if m.registration_status == "EMAIL_CONFIRMED" %}
+            <button class="secondary disabled" disabled>Autologin (fase futura)</button>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+</body>
+</html>

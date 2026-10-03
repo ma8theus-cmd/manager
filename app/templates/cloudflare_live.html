@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cloudflare ao vivo · Manager</title>
+  <style>
+    body{font:16px system-ui,sans-serif;margin:24px;background:#101820;color:#edf4f8}
+    main{max-width:1100px;margin:auto}
+    input,button{font:inherit;padding:10px;border-radius:6px}
+    button{cursor:pointer}
+    #frame{display:block;max-width:100%;height:auto;margin-top:18px;border:1px solid #61717c;touch-action:none}
+    #status{margin:12px 0;color:#a9c5d4}
+  </style>
+</head>
+<body><main>
+  <h1>Cloudflare ao vivo na VPS</h1>
+  <p>Insira o código temporário recebido no Discord. A tela mostra a aba ativa; clique nela para enviar o clique à VPS.</p>
+  <form id="connect"><label>Código temporário <input id="code" type="password" autocomplete="off" required></label> <button>Conectar</button></form>
+  <div id="status" role="status">Aguardando código.</div>
+  <canvas id="frame" aria-label="Visualização ao vivo da página na VPS" hidden></canvas>
+  <p><button id="disconnect" type="button" hidden>Desconectar</button></p>
+</main>
+<script>
+const form=document.getElementById('connect'), codeInput=document.getElementById('code');
+const frame=document.getElementById('frame'), statusEl=document.getElementById('status');
+const disconnect=document.getElementById('disconnect');
+let code='',timer=null,busy=false;
+const setStatus=s=>statusEl.textContent=s;
+async function refresh(){
+  if(!code||busy)return; busy=true;
+  try{
+    const r=await fetch('/comments/cloudflare-live/frame',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+    if(r.status===404){setStatus('Código expirado. Gere outro desafio para conectar novamente.');stop();return;}
+    if(!r.ok){setStatus('A página está atualizando. Mantendo a sessão e tentando de novo...');return;}
+    const bitmap=await createImageBitmap(await r.blob());
+    if(frame.width!==bitmap.width||frame.height!==bitmap.height){frame.width=bitmap.width;frame.height=bitmap.height;}
+    frame.getContext('2d').drawImage(bitmap,0,0);bitmap.close();frame.hidden=false;
+    setStatus('Conectado à aba ativa do navegador na VPS.');
+  }catch(e){setStatus('Reconectando à página na VPS...');}
+  finally{busy=false;}
+}
+function stop(){clearInterval(timer);timer=null;code='';frame.hidden=true;frame.getContext('2d').clearRect(0,0,frame.width,frame.height);disconnect.hidden=true;form.hidden=false;}
+form.addEventListener('submit',e=>{e.preventDefault();code=codeInput.value.trim();if(!code)return;form.hidden=true;disconnect.hidden=false;refresh();timer=setInterval(refresh,700);});
+disconnect.addEventListener('click',stop);
+async function send(action,event,delta_y=0){
+  if(!code||!frame.width||!frame.height)return;
+  const rect=frame.getBoundingClientRect();
+  const x=(event.clientX-rect.left)*frame.width/rect.width;
+  const y=(event.clientY-rect.top)*frame.height/rect.height;
+  try{
+    const r=await fetch('/comments/cloudflare-live/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,action,x,y,delta_y})});
+    if(!r.ok)throw new Error();
+  }catch{setStatus('Não foi possível enviar a interação; reconecte com um código ativo.');}
+}
+frame.addEventListener('click',e=>send('click',e));
+frame.addEventListener('wheel',e=>{e.preventDefault();send('wheel',e,e.deltaY);},{passive:false});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+window.addEventListener('beforeunload',()=>{clearInterval(timer);code='';});
+</script>
+</body>
+</html>

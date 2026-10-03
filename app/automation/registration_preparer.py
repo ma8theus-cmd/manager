@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+
+from playwright.async_api import async_playwright
+
+from app.config import settings
+from app.database import init_db
+from app.discord_notifier import queue_discord_notification, send_discord
+from app.services import defer_registration_rate_limit, get_members_by_ids, prepare_members_by_ids, set_status
+from app.site_adapter.meslibertines import ManualIntervention, MesLibertinesAdapter, RegistrationRateLimited
+from app.automation.registration_state import (
+    mark_account_created_automatic,
+    mark_authorized_flow_started,
+)
+
+
+def setup_logging() -> None:
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.FileHandler(settings.logs_dir / "registration.log", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
+
+
+async def notify_safely(message: str) -> None:
+    try:
+        await send_discord(message)
+    except Exception:
+        logging.exception("Falha ao enviar notificação de cadastro ao Discord.")
+
+
+async def run(member_ids: list[int]) -> None:
+    setup_logging()
+    init_db()
+
+    if not settings.universal_password or settings.universal_password == "CHANGE_ME":
+        raise RuntimeError("Configure UNIVERSAL_ACCOUNT_PASSWORD no .env antes de executar.")
+
+    prepared_ids = prepare_members_by_ids(member_ids)
+
+    members = get_members_by_ids(prepared_ids)
+    if not members:
+        raise RuntimeError("Nenhum membro encontrado.")
+
+    for member in members:
+        if not member.get("username"):
+            raise RuntimeError(
+                f"Membro {member['id']}: username ausente. "
+                "Cadastro abortado antes de abrir o navegador."
+            )
+
+        if not member.get("email"):
+            raise RuntimeError(
+                f"Membro {member['id']}: email ausente. "
+                "Cadastro abortado antes de abrir o navegador."
+            )
+
+    settings.screenshots_dir.mkdir(parents=True, exist_ok=True)
+    adapter = MesLibertinesAdapter()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=settings.headless)
+
+        try:
+            # One isolated context per member. Cookies/login state from a
+            # successfully created account are never shared with the next one.
+            for member in members:
+                member_id = member["id"]
+                context = await browser.new_context()
+                page = await context.new_page()
+
+                try:
+                    set_status(member_id, "FORM_PREPARING")
+                    mark_authorized_flow_started(member_id)
+                    route = member.get("registration_route") or "DIRECT"
+                    logging.info(
+                        "Membro %s: iniciando cadastro automático autorizado pela rota %s",
+                        member_id, route,
+                    )
+
+                    await adapter.register_member(
+                        page,
+                        member,
+                        settings.universal_password,
+                    )
+
+                    created_at = mark_account_created_automatic(member_id)
+                    logging.info(
+                        "Membro %s: +18 confirmado, Terms aceitos e Register concluído; "
+                        "aguardando confirmação de email",
+                        member_id,
+                    )
+                    try:
+                        queue_discord_notification(
+                            f"account-created:{member_id}:{created_at}",
+                            "✅ **CONTA CRIADA**\n"
+                            f"Membro: {member['first_name']} {member['last_name']}\n"
+                            f"Conta: {member['username']}\n"
+                            f"Rota: {route}\n"
+                            "Status: aguardando confirmação de email",
+                        )
+                    except Exception:
+                        logging.exception(
+                            "Falha ao enfileirar notificação de cadastro no Discord para membro %s.",
+                            member_id,
+                        )
+
+                except RegistrationRateLimited as exc:
+                    msg = str(exc)
+                    defer_registration_rate_limit(member_id, msg)
+                    shot = settings.screenshots_dir / f"member_{member_id:04d}_rate_limited.png"
+                    try:
+                        await page.screenshot(path=str(shot), full_page=True)
+                    except Exception:
+                        pass
+                    logging.warning("Membro %s: %s", member_id, msg)
+                    await notify_safely(
+                        "⏳ **CADASTRO ADIADO**\n"
+                        f"Membro: {member['first_name']} {member['last_name']}\n"
+                        "Motivo: limite diário/IP do site.\n"
+                        "Status: voltou para PENDING; o limite do site não é imposto pelo Manager."
+                    )
+
+                except ManualIntervention as exc:
+                    msg = str(exc)
+                    set_status(member_id, "MANUAL_INTERVENTION", msg)
+                    shot = settings.screenshots_dir / f"member_{member_id:04d}_manual.png"
+                    try:
+                        await page.screenshot(path=str(shot), full_page=True)
+                    except Exception:
+                        pass
+                    logging.warning("Membro %s: %s", member_id, msg)
+                    await notify_safely(
+                        "⚠️ **CADASTRO REQUER INTERVENÇÃO**\n"
+                        f"Membro: {member['first_name']} {member['last_name']}\n"
+                        f"Motivo: {msg}"
+                    )
+
+                except Exception as exc:
+                    msg = f"{type(exc).__name__}: {exc}"
+                    set_status(member_id, "MANUAL_INTERVENTION", msg)
+                    shot = settings.screenshots_dir / f"member_{member_id:04d}_error.png"
+                    try:
+                        await page.screenshot(path=str(shot), full_page=True)
+                    except Exception:
+                        pass
+                    logging.exception("Membro %s: falha no cadastro automático", member_id)
+                    await notify_safely(
+                        "⚠️ **ERRO TÉCNICO NO CADASTRO**\n"
+                        f"Membro: {member['first_name']} {member['last_name']}\n"
+                        f"Motivo: {msg}"
+                    )
+
+                finally:
+                    await context.close()
+
+        finally:
+            if browser.is_connected():
+                await browser.close()
+
+    logging.info("Lote finalizado. O navegador foi encerrado automaticamente.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ids", nargs="+", type=int, required=True)
+    args = parser.parse_args()
+    asyncio.run(run(args.ids))
+
+
+if __name__ == "__main__":
+    main()

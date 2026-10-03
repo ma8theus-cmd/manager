@@ -1,0 +1,12 @@
+{
+  "updated_at": "2026-10-02T09:25:34+00:00",
+  "target": 257,
+  "min_score": 8.0,
+  "qualified": 551,
+  "pending_pages": 1654,
+  "processed_pages": 666,
+  "error_pages": 0,
+  "backoff_until": "",
+  "note": "alvo concluido; nenhuma nova requisicao",
+  "complete": true
+}

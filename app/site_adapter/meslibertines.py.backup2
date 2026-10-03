@@ -1,0 +1,319 @@
+\
+from __future__ import annotations
+
+import re
+from datetime import datetime
+
+from playwright.async_api import Locator, Page
+
+from app.config import settings
+
+
+class ManualIntervention(RuntimeError):
+    pass
+
+
+class MesLibertinesAdapter:
+    """
+    Adapter deliberadamente NÃO contém código para:
+      - marcar aceite dos termos;
+      - clicar no botão final Register;
+      - resolver CAPTCHA/anti-bot.
+    """
+
+    async def open_registration(self, page: Page) -> Locator:
+        # Abre primeiro a página inicial.
+        # A verificação de maioridade é feita manualmente pelo operador.
+        await page.goto(
+            "https://www.meslibertines.com/",
+            wait_until="domcontentloaded",
+            timeout=45_000,
+        )
+
+        print("=" * 70)
+        print("VERIFICAÇÃO DE MAIORIDADE")
+        print("Conclua manualmente o popup +18 no Chromium.")
+        print("A automação aguardará até o popup desaparecer.")
+        print("=" * 70)
+
+        # A VPS é lenta, então damos alguns segundos
+        # para o popup terminar de carregar.
+        await page.wait_for_timeout(3000)
+
+        async def age_gate_visible():
+            # Procura sinais VISÍVEIS da tela de maioridade.
+            markers = [
+                "date de naissance",
+                "votre date de naissance",
+                "18 ans",
+                "majorité",
+                "majeur",
+                "age verification",
+            ]
+
+            visible_text = False
+
+            for marker in markers:
+                candidates = page.get_by_text(
+                    marker,
+                    exact=False,
+                )
+
+                for i in range(min(await candidates.count(), 10)):
+                    try:
+                        if await candidates.nth(i).is_visible():
+                            visible_text = True
+                            break
+                    except Exception:
+                        pass
+
+                if visible_text:
+                    break
+
+            # Estruturas comuns de modal/popup.
+            dialogs = page.locator(
+                '[role="dialog"]:visible, '
+                '.modal:visible, '
+                '.popup:visible, '
+                '[class*="modal"]:visible, '
+                '[class*="popup"]:visible'
+            )
+
+            dialog_visible = await dialogs.count() > 0
+
+            # Muitos gates de idade usam 3 selects:
+            # dia / mês / ano.
+            visible_selects = page.locator("select:visible")
+            date_selects_visible = await visible_selects.count() >= 3
+
+            return visible_text and (
+                dialog_visible or date_selects_visible
+            )
+
+        while await age_gate_visible():
+            print("Aguardando você concluir a verificação +18...")
+            await page.wait_for_timeout(1000)
+
+        print("Verificação +18 concluída.")
+        print("Aguardando o site salvar a sessão...")
+
+        await page.wait_for_timeout(3000)
+
+        print("Abrindo página de registro...")
+
+        await page.goto(
+            settings.registration_url,
+            wait_until="domcontentloaded",
+            timeout=45_000,
+        )
+
+        # Dá tempo para o formulário terminar de montar.
+        await page.wait_for_timeout(2500)
+
+        await self._detect_protection(page)
+
+        register_button = page.get_by_role(
+            "button",
+            name=re.compile(r"Register|Inscription", re.I)
+        )
+
+        if await register_button.count():
+            form = register_button.first.locator(
+                "xpath=ancestor::form[1]"
+            )
+
+            if await form.count():
+                return form
+
+        forms = page.locator("form")
+
+        if await forms.count() == 0:
+            raise ManualIntervention(
+                "Formulário de registro não encontrado."
+            )
+
+        return forms.first
+
+    async def fill_member(self, page: Page, member: dict, password: str) -> None:
+        form = await self.open_registration(page)
+
+        await self._choose_member(form)
+        await self._fill_text(form, ["Username"], ["username", "user", "login"], member["username"])
+        await self._fill_text(form, ["Email"], ["email", "mail"], member["email"])
+
+        password_inputs = form.locator('input[type="password"]')
+        if await password_inputs.count() < 2:
+            raise ManualIntervention("Não encontrei os dois campos de senha.")
+        await password_inputs.nth(0).fill(password)
+        await password_inputs.nth(1).fill(password)
+
+        await self._select_country_france(form)
+        await self._fill_text(form, ["Home city", "City"], ["city", "ville"], member["city_france"])
+        await self._fill_birth_date(form, member["birth_date"])
+
+        # Trava conceitual: não há qualquer interação com a checkbox de termos
+        # nem com o botão final de registro.
+        await self._detect_protection(page)
+
+    async def _choose_member(self, form: Locator):
+        for pattern in (r"^Member$", r"Membre"):
+            loc = form.get_by_label(re.compile(pattern, re.I))
+            if await loc.count():
+                await loc.first.check()
+                return
+
+        radios = form.locator('input[type="radio"]')
+        count = await radios.count()
+        if count >= 2:
+            # A página pública mostra "Escorte" e depois "Member".
+            await radios.nth(1).check()
+            return
+        raise ManualIntervention("Não encontrei a opção de tipo de conta 'Member'.")
+
+    async def _fill_text(self, form: Locator, labels: list[str], keywords: list[str], value: str):
+        for label in labels:
+            loc = form.get_by_label(re.compile(label, re.I))
+            if await loc.count():
+                await loc.first.fill(str(value))
+                return
+
+        inputs = form.locator('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="password"])')
+        for i in range(await inputs.count()):
+            loc = inputs.nth(i)
+            meta = " ".join(
+                (await loc.get_attribute(attr) or "")
+                for attr in ("name", "id", "placeholder", "title", "aria-label", "type")
+            ).lower()
+            if any(k.lower() in meta for k in keywords):
+                await loc.fill(str(value))
+                return
+
+        raise ManualIntervention(f"Campo não encontrado: {labels[0]}")
+
+    async def _select_country_france(self, form: Locator):
+        selects = form.locator("select")
+        count = await selects.count()
+        if not count:
+            raise ManualIntervention("Nenhum select encontrado no formulário.")
+
+        country = None
+        for i in range(count):
+            loc = selects.nth(i)
+            meta = " ".join(
+                (await loc.get_attribute(attr) or "")
+                for attr in ("name", "id", "title", "aria-label")
+            ).lower()
+            if "country" in meta or "pays" in meta:
+                country = loc
+                break
+
+        country = country or selects.nth(0)
+        options = country.locator("option")
+        for i in range(await options.count()):
+            opt = options.nth(i)
+            text = (await opt.inner_text()).strip().lower()
+            if text == "france" or "france" in text:
+                value = await opt.get_attribute("value")
+                if value is not None:
+                    await country.select_option(value=value)
+                else:
+                    await country.select_option(label=(await opt.inner_text()).strip())
+                return
+        raise ManualIntervention("Opção France não encontrada no campo de país.")
+
+    async def _fill_birth_date(self, form: Locator, birth_date: str):
+        dt = datetime.strptime(birth_date, "%Y-%m-%d")
+        selects = form.locator("select")
+        count = await selects.count()
+
+        # Tenta identificar pelos atributos.
+        found = {}
+        for i in range(count):
+            loc = selects.nth(i)
+            meta = " ".join(
+                (await loc.get_attribute(attr) or "")
+                for attr in ("name", "id", "title", "aria-label")
+            ).lower()
+            if any(k in meta for k in ("day", "jour")):
+                found["day"] = loc
+            elif any(k in meta for k in ("month", "mois")):
+                found["month"] = loc
+            elif any(k in meta for k in ("year", "annee", "année")):
+                found["year"] = loc
+
+        # Fallback: no formulário público há país + três selects de nascimento.
+        if len(found) < 3:
+            candidates = []
+            for i in range(count):
+                loc = selects.nth(i)
+                meta = " ".join(
+                    (await loc.get_attribute(attr) or "")
+                    for attr in ("name", "id", "title", "aria-label")
+                ).lower()
+                if "country" not in meta and "pays" not in meta:
+                    candidates.append(loc)
+            if len(candidates) >= 3:
+                found = {"day": candidates[-3], "month": candidates[-2], "year": candidates[-1]}
+
+        if len(found) < 3:
+            raise ManualIntervention("Não consegui identificar os 3 campos da data de nascimento.")
+
+        await self._select_numeric(found["day"], dt.day, kind="day")
+        await self._select_numeric(found["month"], dt.month, kind="month")
+        await self._select_numeric(found["year"], dt.year, kind="year")
+
+    async def _select_numeric(self, select: Locator, number: int, kind: str):
+        month_names = {
+            1: ("january", "janvier"),
+            2: ("february", "février", "fevrier"),
+            3: ("march", "mars"),
+            4: ("april", "avril"),
+            5: ("may", "mai"),
+            6: ("june", "juin"),
+            7: ("july", "juillet"),
+            8: ("august", "août", "aout"),
+            9: ("september", "septembre"),
+            10: ("october", "octobre"),
+            11: ("november", "novembre"),
+            12: ("december", "décembre", "decembre"),
+        }
+
+        options = select.locator("option")
+        for i in range(await options.count()):
+            opt = options.nth(i)
+            text = (await opt.inner_text()).strip().lower()
+            value = (await opt.get_attribute("value") or "").strip().lower()
+
+            numeric_matches = {
+                str(number),
+                f"{number:02d}",
+            }
+
+            ok = text in numeric_matches or value in numeric_matches
+            if kind == "month":
+                ok = ok or any(name in text for name in month_names[number])
+
+            if ok:
+                raw_value = await opt.get_attribute("value")
+                if raw_value is not None:
+                    await select.select_option(value=raw_value)
+                else:
+                    await select.select_option(label=(await opt.inner_text()).strip())
+                return
+
+        raise ManualIntervention(f"Não consegui selecionar {kind}={number}.")
+
+    async def _detect_protection(self, page: Page):
+        text = (await page.locator("body").inner_text()).lower()
+        suspicious = [
+            "captcha",
+            "cloudflare",
+            "too many requests",
+            "rate limit",
+            "verify you are human",
+            "vérifiez que vous êtes humain",
+            "access denied",
+        ]
+        for marker in suspicious:
+            if marker in text:
+                raise ManualIntervention(f"Proteção/verificação detectada: {marker}")

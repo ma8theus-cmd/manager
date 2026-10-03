@@ -1,0 +1,497 @@
+\
+from __future__ import annotations
+
+import secrets
+from datetime import datetime, timedelta, timezone
+from typing import Iterable
+
+from .config import settings
+from .database import add_event, get_connection, transaction, utc_now
+from .username_generator import username_candidates
+
+
+ACTIVE_DAILY_STATUSES = {
+    "SELECTED",
+    "FORM_PREPARING",
+    "FORM_PREPARED",
+    "MANUAL_INTERVENTION",
+    "WAITING_EMAIL_CONFIRMATION",
+    "EMAIL_CONFIRMED",
+    "PROFILE_PENDING",
+    "PROFILE_COMPLETE",
+}
+
+
+def today_local_iso() -> str:
+    return datetime.now().date().isoformat()
+
+
+def _unique_username(conn, first_name: str, last_name: str, member_id: int) -> str:
+    for candidate in username_candidates(first_name, last_name, seed=member_id):
+        exists = conn.execute(
+            "SELECT 1 FROM members WHERE username = ? AND id <> ?",
+            (candidate, member_id),
+        ).fetchone()
+        if not exists:
+            return candidate
+    raise RuntimeError(f"Não foi possível gerar username único para membro {member_id}.")
+
+
+def _unique_email(conn, member_id: int) -> str:
+    if not settings.email_domain:
+        raise RuntimeError("EMAIL_DOMAIN não configurado no .env")
+
+    # member_id garante identidade; token reduz previsibilidade.
+    for _ in range(20):
+        token = secrets.token_hex(2)
+        email = f"member{member_id:04d}.{token}@{settings.email_domain}".lower()
+        exists = conn.execute(
+            "SELECT 1 FROM members WHERE email = ? AND id <> ?",
+            (email, member_id),
+        ).fetchone()
+        if not exists:
+            return email
+    raise RuntimeError("Não foi possível gerar email único.")
+
+
+def _parse_timestamp(value: str):
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def batch_status():
+    """
+    O lote seguinte fica disponível BATCH_INTERVAL_HOURS
+    depois do último lote reservado.
+    """
+    now = datetime.now(timezone.utc)
+
+    with get_connection() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM members WHERE registration_status='PENDING'"
+        ).fetchone()[0]
+
+        last_started = conn.execute(
+            """
+            SELECT MAX(selected_at)
+            FROM members
+            WHERE selected_at IS NOT NULL
+            """
+        ).fetchone()[0]
+
+        if not last_started:
+            return {
+                "available": pending > 0,
+                "pending": pending,
+                "last_batch_started_at": None,
+                "next_batch_at": None,
+                "remaining_seconds": 0,
+                "last_batch_size": 0,
+            }
+
+        last_dt = _parse_timestamp(last_started)
+
+        next_dt = last_dt + timedelta(
+            hours=settings.batch_interval_hours
+        )
+
+        remaining = max(
+            0,
+            int((next_dt - now).total_seconds())
+        )
+
+        last_batch_size = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM members
+            WHERE selected_at = ?
+            """,
+            (last_started,),
+        ).fetchone()[0]
+
+        return {
+            "available": pending > 0 and remaining == 0,
+            "pending": pending,
+            "last_batch_started_at": last_started,
+            "next_batch_at": next_dt.isoformat(),
+            "remaining_seconds": remaining,
+            "last_batch_size": last_batch_size,
+        }
+
+
+def reserve_daily_batch() -> list[int]:
+    """
+    Mantemos o nome da função para compatibilidade com o painel,
+    mas agora a regra é um lote a cada BATCH_INTERVAL_HOURS.
+    """
+
+    now_dt = datetime.now(timezone.utc)
+
+    with transaction(immediate=True) as conn:
+
+        last_started = conn.execute(
+            """
+            SELECT MAX(selected_at)
+            FROM members
+            WHERE selected_at IS NOT NULL
+            """
+        ).fetchone()[0]
+
+        if last_started:
+            last_dt = _parse_timestamp(last_started)
+
+            next_dt = last_dt + timedelta(
+                hours=settings.batch_interval_hours
+            )
+
+            if now_dt < next_dt:
+                return []
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM members
+            WHERE registration_status = 'PENDING'
+            ORDER BY id
+            LIMIT ?
+            """,
+            (settings.daily_account_limit,),
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        ids = []
+        now = utc_now()
+        today = today_local_iso()
+
+        for row in rows:
+            username = row["username"] or _unique_username(
+                conn,
+                row["first_name"],
+                row["last_name"],
+                row["id"],
+            )
+
+            email = row["email"] or _unique_email(
+                conn,
+                row["id"],
+            )
+
+            conn.execute(
+                """
+                UPDATE members
+                SET username = ?,
+                    email = ?,
+                    registration_status = 'SELECTED',
+                    selected_date = ?,
+                    selected_at = ?,
+                    registration_attempts =
+                        registration_attempts + 1,
+                    last_error = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    username,
+                    email,
+                    today,
+                    now,
+                    now,
+                    row["id"],
+                ),
+            )
+
+            add_event(
+                conn,
+                row["id"],
+                "MEMBER_SELECTED",
+                "Selecionado para um novo lote.",
+            )
+
+            ids.append(row["id"])
+
+        return ids
+
+
+def get_members_by_ids(member_ids: Iterable[int]):
+    member_ids = list(member_ids)
+    if not member_ids:
+        return []
+    placeholders = ",".join("?" for _ in member_ids)
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM members WHERE id IN ({placeholders}) ORDER BY id",
+            member_ids,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_status(member_id: int, status: str, error: str | None = None):
+    with transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE members
+            SET registration_status = ?,
+                last_error = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (status, error, utc_now(), member_id),
+        )
+        add_event(conn, member_id, status, error or "")
+
+
+def mark_form_prepared(member_id: int):
+    with transaction(immediate=True) as conn:
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE members
+            SET registration_status = 'FORM_PREPARED',
+                form_prepared_at = ?,
+                last_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, member_id),
+        )
+        add_event(conn, member_id, "FORM_PREPARED", "Formulário preenchido; termos não foram aceitos.")
+
+
+def mark_account_created(member_id: int):
+    with transaction(immediate=True) as conn:
+        row = conn.execute("SELECT registration_status FROM members WHERE id=?", (member_id,)).fetchone()
+        if not row:
+            raise ValueError("Membro inexistente.")
+        if row["registration_status"] not in {"FORM_PREPARED", "MANUAL_INTERVENTION"}:
+            raise ValueError(f"Status atual não permite marcar conta criada: {row['registration_status']}")
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE members
+            SET registration_status='WAITING_EMAIL_CONFIRMATION',
+                email_status='PENDING',
+                account_created_at=?,
+                last_error=NULL,
+                updated_at=?
+            WHERE id=?
+            """,
+            (now, now, member_id),
+        )
+        add_event(conn, member_id, "ACCOUNT_CREATED", "Conta marcada manualmente como criada.")
+
+
+def mark_email_confirmed(member_id: int):
+    with transaction(immediate=True) as conn:
+        row = conn.execute("SELECT registration_status FROM members WHERE id=?", (member_id,)).fetchone()
+        if not row:
+            raise ValueError("Membro inexistente.")
+        if row["registration_status"] != "WAITING_EMAIL_CONFIRMATION":
+            raise ValueError(f"Status atual não permite confirmar email: {row['registration_status']}")
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE members
+            SET registration_status='EMAIL_CONFIRMED',
+                email_status='CONFIRMED',
+                profile_status='PENDING',
+                email_confirmed_at=?,
+                updated_at=?
+            WHERE id=?
+            """,
+            (now, now, member_id),
+        )
+        add_event(conn, member_id, "EMAIL_CONFIRMED", "Email confirmado manualmente pelo operador.")
+
+
+
+def claim_profile_activation(member_id: int) -> None:
+    """Atomically claim one confirmed account for profile completion."""
+    with transaction(immediate=True) as conn:
+        row = conn.execute(
+            "SELECT registration_status, email_status, profile_status FROM members WHERE id=?",
+            (member_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("Membro inexistente.")
+        if row["email_status"] != "CONFIRMED":
+            raise ValueError("O email precisa estar confirmado antes de ativar o perfil.")
+        if row["profile_status"] == "COMPLETE" or row["registration_status"] == "PROFILE_COMPLETE":
+            raise ValueError("Perfil já está completo.")
+        if row["profile_status"] == "ACTIVATING":
+            raise ValueError("O perfil já está sendo ativado.")
+        if row["registration_status"] not in {"EMAIL_CONFIRMED", "PROFILE_PENDING"}:
+            raise ValueError(
+                f"Status atual não permite ativação do perfil: {row['registration_status']}"
+            )
+
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE members
+            SET profile_status='ACTIVATING',
+                registration_status='PROFILE_PENDING',
+                last_error=NULL,
+                updated_at=?
+            WHERE id=?
+            """,
+            (now, member_id),
+        )
+        add_event(
+            conn, member_id, "PROFILE_ACTIVATION_STARTED",
+            "Ativação automática do perfil iniciada: Je suis=homme e Ville=cidade do membro."
+        )
+
+
+def mark_profile_complete(member_id: int) -> None:
+    with transaction(immediate=True) as conn:
+        row = conn.execute("SELECT id FROM members WHERE id=?", (member_id,)).fetchone()
+        if not row:
+            raise ValueError("Membro inexistente.")
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE members
+            SET registration_status='PROFILE_COMPLETE',
+                profile_status='COMPLETE',
+                profile_completed_at=?,
+                last_error=NULL,
+                updated_at=?
+            WHERE id=?
+            """,
+            (now, now, member_id),
+        )
+        add_event(
+            conn, member_id, "PROFILE_COMPLETE",
+            "Perfil validado após salvar Je suis=homme e Ville."
+        )
+
+
+def mark_profile_intervention(member_id: int, error: str) -> None:
+    with transaction(immediate=True) as conn:
+        row = conn.execute("SELECT id FROM members WHERE id=?", (member_id,)).fetchone()
+        if not row:
+            raise ValueError("Membro inexistente.")
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE members
+            SET registration_status='EMAIL_CONFIRMED',
+                profile_status='MANUAL_INTERVENTION',
+                last_error=?,
+                updated_at=?
+            WHERE id=?
+            """,
+            (error, now, member_id),
+        )
+        add_event(conn, member_id, "PROFILE_MANUAL_INTERVENTION", error)
+
+def reset_to_pending(member_id: int):
+    with transaction(immediate=True) as conn:
+        row = conn.execute("SELECT registration_status FROM members WHERE id=?", (member_id,)).fetchone()
+        if not row:
+            raise ValueError("Membro inexistente.")
+        if row["registration_status"] in {"WAITING_EMAIL_CONFIRMATION", "EMAIL_CONFIRMED", "PROFILE_COMPLETE"}:
+            raise ValueError("Conta já avançou demais para voltar a PENDING.")
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE members
+            SET registration_status='PENDING',
+                selected_date=NULL,
+                selected_at=NULL,
+                form_prepared_at=NULL,
+                last_error=NULL,
+                updated_at=?
+            WHERE id=?
+            """,
+            (now, member_id),
+        )
+        add_event(conn, member_id, "RESET_PENDING", "Registro devolvido manualmente para PENDING.")
+
+
+def dashboard_data():
+    status = batch_status()
+
+    with get_connection() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM members"
+        ).fetchone()[0]
+
+        def count_status(value):
+            return conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM members
+                WHERE registration_status=?
+                """,
+                (value,),
+            ).fetchone()[0]
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM members
+            ORDER BY
+                CASE registration_status
+                    WHEN 'FORM_PREPARED' THEN 1
+                    WHEN 'WAITING_EMAIL_CONFIRMATION' THEN 2
+                    WHEN 'PROFILE_PENDING' THEN 3
+                    WHEN 'EMAIL_CONFIRMED' THEN 4
+                    WHEN 'PROFILE_COMPLETE' THEN 5
+                    WHEN 'MANUAL_INTERVENTION' THEN 6
+                    WHEN 'SELECTED' THEN 7
+                    WHEN 'FORM_PREPARING' THEN 8
+                    ELSE 7
+                END,
+                id
+            LIMIT 250
+            """
+        ).fetchall()
+
+        return {
+            "total": total,
+            "pending": count_status("PENDING"),
+
+            "limit": settings.daily_account_limit,
+            "interval_hours": settings.batch_interval_hours,
+
+            "batch_available": status["available"],
+            "next_batch_at": status["next_batch_at"],
+            "remaining_seconds": status["remaining_seconds"],
+            "last_batch_size": status["last_batch_size"],
+
+            "prepared": count_status("FORM_PREPARED"),
+            "waiting_email": count_status(
+                "WAITING_EMAIL_CONFIRMATION"
+            ),
+            "email_confirmed": count_status(
+                "EMAIL_CONFIRMED"
+            ),
+            "manual": count_status(
+                "MANUAL_INTERVENTION"
+            ),
+
+            "profile_pending": conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM members
+                WHERE email_status='CONFIRMED'
+                  AND profile_status IN ('PENDING', 'ACTIVATING', 'MANUAL_INTERVENTION')
+                """
+            ).fetchone()[0],
+
+            "profile_complete": conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM members
+                WHERE profile_status='COMPLETE'
+                """
+            ).fetchone()[0],
+
+            "members": [dict(r) for r in rows],
+        }
+

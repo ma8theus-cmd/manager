@@ -1,0 +1,1198 @@
+\
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MesLibertines Manager</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, Arial, sans-serif; margin: 0; background:#f5f6f8; color:#1d2433; }
+    .wrap { max-width: 1500px; margin: 0 auto; padding: 24px; }
+    h1 { margin-top: 0; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin:18px 0; }
+    .card { background:white; padding:16px; border-radius:12px; box-shadow:0 1px 5px #0001; }
+    .num { font-size:28px; font-weight:700; }
+    .label { font-size:13px; opacity:.7; }
+    .toolbar { background:white; padding:16px; border-radius:12px; margin-bottom:16px; display:flex; gap:12px; align-items:center; }
+    button { border:0; border-radius:8px; padding:10px 14px; cursor:pointer; font-weight:650; }
+    .primary { background:#1f65d6; color:white; }
+    .ok { background:#14804a; color:white; }
+    .warn { background:#d98b09; color:white; }
+    .secondary { background:#e9edf3; color:#1d2433; }
+    .disabled { opacity:.45; cursor:not-allowed; }
+    table { width:100%; border-collapse:collapse; background:white; border-radius:12px; overflow:hidden; }
+    th,td { padding:11px 10px; border-bottom:1px solid #edf0f4; text-align:left; vertical-align:top; font-size:14px; }
+    th { background:#f0f3f8; position:sticky; top:0; }
+    .status { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef2f7; font-size:12px; font-weight:700; }
+    .msg { padding:12px; border-radius:8px; margin:12px 0; background:#e8f7ee; }
+    .error { padding:12px; border-radius:8px; margin:12px 0; background:#fdeaea; color:#8f2020; }
+    form { display:inline; }
+    small { opacity:.68; }
+    .section { margin-top:18px; }
+    .section h2 { margin:0 0 10px; font-size:20px; }
+    .scout-found { background:#e8f7ee; }
+    .scout-expired { background:#fff5df; }
+    .scout-error { background:#fdeaea; }
+
+    .scout-create-card { margin-bottom:16px; }
+    .scout-create-card h3 { margin:0 0 6px; font-size:17px; }
+    .helper { margin:0 0 14px; font-size:14px; opacity:.78; }
+    .scout-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .scout-form label { display:flex; flex-direction:column; gap:6px; font-size:13px; font-weight:650; }
+    .scout-form label.wide, .scout-form .wide { grid-column:1 / -1; }
+    input, select, textarea { width:100%; border:1px solid #ccd3de; border-radius:8px; padding:10px; font:inherit; background:white; color:#1d2433; }
+    textarea { resize:vertical; min-height:92px; }
+    .form-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .notice { padding:12px; border-radius:8px; background:#fff5df; }
+    .scout-comment { max-width:360px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    a { color:#1f65d6; }
+    @media (max-width:800px) { .scout-form { grid-template-columns:1fr; } .scout-form label.wide, .scout-form .wide { grid-column:auto; } }
+
+    /* UI refresh 2026-09-11 */
+    :root { --ink:#182033; --muted:#687386; --line:#e5e9f0; --panel:#fff; --accent:#2856d8; --accent2:#6d48df; }
+    body { background:linear-gradient(180deg,#eef3ff 0,#f7f8fb 260px); color:var(--ink); }
+    .wrap { max-width:1600px; padding:28px 32px 56px; }
+    h1 { font-size:32px; letter-spacing:-.035em; margin-bottom:6px; }
+    h1 + p { color:var(--muted); max-width:900px; margin-top:0; }
+    .cards { gap:14px; }
+    .card { border:1px solid rgba(225,230,239,.9); border-radius:16px; box-shadow:0 8px 24px rgba(32,48,80,.055); }
+    .cards > .card { position:relative; overflow:hidden; }
+    .cards > .card::before { content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:linear-gradient(var(--accent),var(--accent2)); opacity:.65; }
+    .num { font-size:30px; letter-spacing:-.035em; }
+    .label { color:var(--muted); opacity:1; font-weight:600; }
+    .toolbar { border:1px solid var(--line); border-radius:16px; box-shadow:0 8px 24px rgba(32,48,80,.05); }
+    button { border-radius:10px; transition:transform .15s ease,box-shadow .15s ease,opacity .15s ease; }
+    button:not(:disabled):hover { transform:translateY(-1px); box-shadow:0 6px 16px rgba(32,48,80,.14); }
+    .primary { background:linear-gradient(135deg,#2856d8,#6447d9); }
+    table { border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 24px rgba(32,48,80,.04); }
+    th { background:#f6f8fc; color:#596579; font-size:12px; text-transform:uppercase; letter-spacing:.045em; }
+    tbody tr { transition:background .12s ease; } tbody tr:hover { background:#f8faff; }
+    .status { background:#edf1f7; color:#4e5b70; }
+    .section { margin-top:30px; scroll-margin-top:20px; } .section h2 { font-size:22px; letter-spacing:-.02em; }
+    input:focus,select:focus,textarea:focus { outline:3px solid rgba(40,86,216,.12); border-color:#7694e8; }
+    .quick-nav { display:flex; gap:8px; flex-wrap:wrap; margin:18px 0 4px; position:sticky; top:10px; z-index:20; padding:8px; width:max-content; max-width:100%; background:rgba(255,255,255,.86); backdrop-filter:blur(12px); border:1px solid var(--line); border-radius:13px; box-shadow:0 6px 20px #1e293b12; }
+    .quick-nav a { color:#4b5870; text-decoration:none; font-size:13px; font-weight:700; padding:7px 10px; border-radius:8px; } .quick-nav a:hover { background:#eef3ff; color:#2856d8; }
+    .table-wrap { overflow:auto; border-radius:14px; }
+    #member-search { max-width:340px; margin:0 0 10px; }
+    @media(max-width:800px){.wrap{padding:18px 14px 40px}.quick-nav{position:static;width:100%}h1{font-size:27px}th,td{font-size:13px}}
+
+    /* Dark compact pass 2026-09-11 */
+    :root{--ink:#edf2f7;--muted:#8e99aa;--line:#202938;--panel:#111827;--panel2:#0f172a;--accent:#6f8cff;--accent2:#8b5cf6;}
+    body{background:#0a0f1a;color:var(--ink);}
+    .wrap{max-width:1500px;padding:16px 18px 32px;}
+    h1{font-size:26px;margin:0 0 4px;}
+    h1+p{font-size:13px;color:var(--muted);margin-bottom:10px;max-width:980px;}
+    .quick-nav{top:6px;margin:10px 0 8px;padding:5px;background:rgba(15,23,42,.9);border-color:#263244;box-shadow:0 8px 22px #0006;}
+    .quick-nav a{padding:5px 8px;font-size:12px;color:#aeb8c7}.quick-nav a:hover{background:#182235;color:#fff;}
+    .cards{grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:10px 0;}
+    .card{background:linear-gradient(180deg,#121a2b,#0f1726);border:1px solid #202a3b;border-radius:10px;padding:10px;box-shadow:none;}
+    .cards>.card::before{width:2px;opacity:.8}.num{font-size:22px}.label{font-size:11px;color:#8f9aac;}
+    .toolbar{padding:10px 12px;margin-bottom:10px;background:#101827;border:1px solid #202a3b;border-radius:10px;gap:8px;}
+    button{padding:7px 10px;border-radius:8px;font-size:12px}.primary{background:linear-gradient(135deg,#4f6cf7,#7c4fe0)}.secondary{background:#202b3d;color:#d8e0ea}.ok{background:#167c55}.warn{background:#a96b08}.disabled{opacity:.45}
+    .section{margin-top:16px}.section h2{font-size:17px;margin-bottom:6px}.scout-create-card{margin-bottom:10px}.scout-create-card h3{font-size:14px}.helper{font-size:12px;margin-bottom:8px}.notice,.msg,.error{padding:9px;border-radius:8px;font-size:12px}.msg{background:#103323}.error{background:#351719;color:#f3b4b7}.notice{background:#32280f}
+    input,select,textarea{background:#0d1522;color:#edf2f7;border-color:#2a3648;padding:7px 8px;border-radius:7px;font-size:12px}textarea{min-height:70px}.scout-form{gap:8px}.scout-form label{font-size:12px;gap:4px}.form-actions{gap:8px}
+    table{background:#0f1726;border:1px solid #202a3b;border-radius:10px;box-shadow:none}th,td{padding:7px 7px;border-bottom:1px solid #1e2736;font-size:12px}th{background:#151f2f;color:#9ba7b9;font-size:10px;top:0}tbody tr:hover{background:#131d2d}.status{padding:3px 6px;background:#1d2737;color:#cbd5e1;font-size:10px}.scout-comment{max-width:300px}small{font-size:11px;color:#8995a7;opacity:1}a{color:#8aa4ff}
+    #member-search{max-width:300px;margin:0 0 7px;padding:7px 8px}.table-wrap{border-radius:10px}.compact-hide{display:none!important}
+    details.compact-section{border:1px solid #202a3b;border-radius:10px;background:#0f1726;margin-top:10px;overflow:hidden}details.compact-section>summary{cursor:pointer;list-style:none;padding:10px 12px;font-weight:750;font-size:13px;background:#121b2a}details.compact-section>summary::-webkit-details-marker{display:none}details.compact-section>summary:after{content:'▾';float:right;color:#7f8ba0}details.compact-section[open]>summary:after{content:'▴'}details.compact-section>.compact-body{padding:10px}
+    @media(max-width:800px){.wrap{padding:12px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}th,td{font-size:11px;padding:6px}.quick-nav{position:static}}
+
+    #promising-members { scroll-margin-top:70px; }
+    .promising-tools { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:8px 0 12px; }
+    #promising-search { max-width:420px; }
+    .promising-list { display:grid; gap:10px; }
+    .promising-entry { padding:14px; background:#101827; border:1px solid var(--line); border-radius:10px; min-width:0; }
+    .promising-entry[hidden] { display:none; }
+    .promising-heading { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+    .promising-heading h3 { margin:0; font-size:15px; overflow-wrap:anywhere; }
+    .promising-score { color:#a7efcd; background:#123629; padding:4px 9px; border-radius:20px; font-weight:700; font-size:12px; }
+    .promising-text { margin:12px 0; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.65; font-size:14px; }
+    .promising-meta { display:flex; gap:14px; flex-wrap:wrap; align-items:center; font-size:12px; }
+    .comment-professional-list { display:grid; gap:8px; }
+    details.comment-professional-group { border:1px solid #202a3b; border-radius:9px; overflow:hidden; background:#101827; }
+    details.comment-professional-group > summary { display:flex; align-items:center; justify-content:space-between; gap:12px; cursor:pointer; list-style:none; padding:9px 11px; background:#131e2e; font-size:13px; font-weight:750; }
+    details.comment-professional-group > summary::-webkit-details-marker { display:none; }
+    details.comment-professional-group > summary::after { content:'▾'; color:#7f8ba0; }
+    details.comment-professional-group[open] > summary::after { content:'▴'; }
+    .comment-professional-name { color:#edf2f7; }
+    .comment-professional-meta { color:#8f9aac; font-size:11px; font-weight:600; text-align:right; }
+    .comment-professional-body { padding:10px; }
+    .comment-professional-toolbar { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin-bottom:8px; }
+    .comment-url-form { display:flex; align-items:end; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+    .comment-url-form label { display:flex; flex-direction:column; gap:4px; flex:1 1 320px; font-size:11px; font-weight:650; }
+    .comment-url-form button { flex:0 0 auto; }
+    .comment-table { margin-top:8px; }
+    .comment-table .comment-author-form { display:grid; gap:4px; min-width:170px; }
+    .comment-table .comment-confirm-form { display:flex; flex-direction:column; gap:6px; margin-top:7px; }
+    .comment-table .scout-comment { min-width:260px; max-width:520px; }
+    .member-action-controls { display:flex; gap:6px; flex-wrap:wrap; align-items:flex-start; }
+    .member-action-controls form { display:inline; }
+    @media(max-width:800px){.comment-professional-group > summary{align-items:flex-start;flex-direction:column;gap:4px}.comment-professional-meta{text-align:left}.comment-url-form{align-items:stretch;flex-direction:column}.comment-url-form button{width:100%}.comment-table .scout-comment{min-width:220px}}
+    #member-experiences { scroll-margin-top:70px; }
+    .experience-intro { display:grid; gap:5px; margin-bottom:10px; }
+    .experience-professional-list { display:grid; gap:8px; }
+    details.experience-professional { border:1px solid #202a3b; border-radius:9px; overflow:hidden; background:#101827; }
+    details.experience-professional > summary { display:flex; justify-content:space-between; gap:12px; cursor:pointer; list-style:none; padding:9px 11px; background:#131e2e; font-size:13px; font-weight:750; }
+    details.experience-professional > summary::-webkit-details-marker { display:none; }
+    details.experience-professional > summary::after { content:'▾'; color:#7f8ba0; }
+    details.experience-professional[open] > summary::after { content:'▴'; }
+    .experience-summary-meta { color:#8f9aac; font-size:11px; text-align:right; }
+    .experience-professional-body { padding:10px; display:grid; gap:10px; }
+    .experience-member-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:6px; }
+    .experience-member { display:flex; align-items:center; gap:7px; padding:7px 8px; border:1px solid #263448; border-radius:7px; background:#0d1522; font-size:12px; }
+    .experience-member input { accent-color:#6f8cff; }
+    .experience-actions { display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+    .experience-batch { border:1px solid #263448; border-radius:8px; padding:8px; background:#0d1522; }
+    .experience-batch-heading { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:12px; font-weight:700; }
+    .experience-queue { display:grid; gap:4px; margin:7px 0 0; padding:0; list-style:none; }
+    .experience-queue li { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; border-top:1px solid #202a3b; padding:5px 0; font-size:11px; }
+    .experience-queue .status { margin-left:auto; }
+    .experience-empty { color:#8f9aac; font-size:12px; }
+    @media(max-width:800px){.experience-professional > summary{align-items:flex-start;flex-direction:column;gap:4px}.experience-summary-meta{text-align:left}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Painel central</h1>
+  <p class="compact-hide">Cadastro automático: confirmação +18, aceite dos Terms e envio final são executados pelo agente para os membros previamente autorizados.</p>
+
+  <nav class="quick-nav" aria-label="Navegação rápida"><a href="#overview">Visão geral</a><a href="#professionals">Profissionais</a><a href="#comments">Comentários</a><a href="#negative-professionals">Profissionais negativas</a><a href="#negative-comments">Feedbacks negativos</a><a href="#dissatisfied-members">Membros insatisfeitos</a><a href="#member-experiences">Ajouter privado</a><a href="#scout">Scout</a><a href="#members">Membros</a><a href="#promising-members">Membros promissores</a></nav>
+
+  {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  <div class="cards" id="overview">
+    <div class="card"><div class="num">{{ data.total }}</div><div class="label">Total de membros</div></div>
+    <div class="card"><div class="num">{{ data.pending }}</div><div class="label">Pendentes</div></div>
+    <div class="card"><div class="num">{{ data.primary_vpn_capacity }}/{{ data.primary_vpn_limit }}</div><div class="label">Lote 1 · VPS principal francesa · VPN · {{ "PRONTA" if data.primary_vpn_ready else "AGUARDANDO" }}</div></div>
+    <div class="card"><div class="num">{{ data.secondary_direct_capacity }}/{{ data.secondary_direct_limit }}</div><div class="label">Lote 2 · VPS secundária francesa · direto · {{ "PRONTA" if data.secondary_worker_ready else "AGUARDANDO" }}</div></div>
+    <div class="card"><div class="num">{{ data.secondary_vpn_capacity }}/{{ data.secondary_vpn_limit }}</div><div class="label">Lote 3 · VPS secundária francesa · VPN · {{ "PRONTA" if data.secondary_vpn_ready else "AGUARDANDO" }}</div></div>
+    <div class="card"><div class="num">{{ data.available_capacity }}</div><div class="label">Contas pendentes para preparar</div></div>
+    <div class="card"><div class="num">{{ data.prepared }}</div><div class="label">Formulários preparados</div></div>
+    <div class="card"><div class="num">{{ data.waiting_email }}</div><div class="label">Aguardando email</div></div>
+    <div class="card"><div class="num">{{ data.email_confirmed }}</div><div class="label">Emails confirmados</div></div>
+    <div class="card"><div class="num">{{ data.manual }}</div><div class="label">Intervenção manual</div></div>
+    <div class="card"><div class="num">{{ data.profile_pending }}</div><div class="label">Perfis para ativar</div></div>
+    <div class="card"><div class="num">{{ data.profile_complete }}</div><div class="label">Perfis completos</div></div>
+  </div>
+
+  <div class="toolbar">
+    <form method="post" action="/prepare-batch/PRIMARY_VPN">
+      <button class="primary" type="submit" {% if not data.primary_vpn_capacity %}disabled{% endif %}>
+        Lote 1 · VPS principal francesa · VPN
+      </button>
+    </form>
+
+    <form method="post" action="/prepare-batch/SECONDARY_DIRECT">
+      <button class="primary" type="submit" {% if not data.secondary_direct_capacity %}disabled{% endif %}>
+        Lote 2 · VPS secundária francesa · direto
+      </button>
+    </form>
+
+    <form method="post" action="/prepare-batch/SECONDARY_VPN">
+      <button class="primary" type="submit" {% if not data.secondary_vpn_capacity %}disabled{% endif %}>
+        Lote 3 · VPS secundária francesa · VPN
+      </button>
+    </form>
+
+    <form method="post" action="/worker/sync">
+      <button type="submit">Sincronizar trabalhos remotos</button>
+    </form>
+
+    <small class="compact-hide">
+      Um único painel central. Cada botão reserva até o limite do lote e só envia o trabalho após este clique.
+      {% if not data.secondary_worker_ready %}A VPS secundária ainda não está disponível para o painel.{% endif %}
+      {% if data.primary_vpn_ready %}A VPN da VPS principal está pronta.{% endif %}
+    </small>
+  </div>
+
+
+  <details class="compact-section" id="promising-members">
+    <summary>Membros promissores · {{ data.promising.members|length }}</summary>
+    <div class="compact-body">
+      <p class="helper">Comentários salvos com nota a partir de 8/10, ordenados pela maior nota.</p>
+      <p class="helper">Próximo TXT: {{ data.lead_exports.pending }}/50 comentários novos. Um arquivo por lote de 50, sem repetições.</p>
+      <div class="promising-tools">
+        {% for batch in data.lead_exports.batches %}
+        <a href="/leads/batches/{{ batch.id }}/download" download>Baixar TXT · Lote {{ batch.id }} · {{ batch.item_count }} comentários</a>
+        {% endfor %}
+      </div>
+      {% if data.promising.error %}
+      <p class="error" role="alert">{{ data.promising.error }}</p>
+      {% else %}
+      <div class="promising-tools">
+        <label for="promising-search">Buscar</label>
+        <input id="promising-search" type="search" placeholder="Login ou trecho do comentário…" autocomplete="off">
+        <span id="promising-count" aria-live="polite">{{ data.promising.members|length }} membros</span>
+      </div>
+      <div class="promising-list">
+        {% for member in data.promising.members %}
+        <article class="promising-entry">
+          <div class="promising-heading">
+            <h3>{{ member.login or ('Login não registrado · ' ~ member.profile_id) }}</h3>
+            <span class="promising-score">{{ "%.1f"|format(member.score) }}/10</span>
+          </div>
+          <p class="promising-text">{{ member.comment }}</p>
+          <div class="promising-meta">
+            <span>{{ member.date_text or 'Data do comentário não disponível' }}</span>
+            {% if member.source_url %}<a href="{{ member.source_url }}" target="_blank" rel="noopener noreferrer">Ver fonte ↗</a>{% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      <p id="promising-empty" {% if data.promising.members %}hidden{% endif %}>Nenhum membro encontrado.</p>
+      {% endif %}
+    </div>
+  </details>
+
+  <details class="compact-section" id="member-experiences">
+    <summary>Ajouter privado · fila por profissional</summary>
+    <div class="compact-body">
+      <div class="experience-intro">
+        <p class="helper"><strong>Fluxo em duas etapas:</strong> selecione os membros com feedback positivo confirmado e prepare a fila. Preparar a fila não faz login nem clique; a execução só começa no botão do lote.</p>
+        <p class="helper">Cada conta é usada individualmente. O executor registra login, Ajouter, logout e conclusão. Após o logout confirmado, a próxima conta é iniciada imediatamente. Barreiras de segurança do site ficam para intervenção manual.</p>
+      </div>
+
+      <div class="experience-professional-list">
+        {% for p in data.member_experience.professionals %}
+        <details class="experience-professional">
+          <summary>
+            <span>{{ p.name }}</span>
+            <span class="experience-summary-meta">{{ p.eligible_members|length }} elegíveis · {{ p.batches|length }} lotes recentes</span>
+          </summary>
+          <div class="experience-professional-body">
+            <small>Anúncio: {{ p.target_url or 'URL não cadastrada' }}</small>
+
+            {% if p.eligible_members and p.target_url %}
+            <form method="post" action="/member-experience/queue">
+              <input type="hidden" name="professional_id" value="{{ p.id }}">
+              <div class="experience-member-grid">
+                {% for m in p.eligible_members %}
+                <label class="experience-member">
+                  <input type="checkbox" name="member_id" value="{{ m.id }}">
+                  <span>#{{ '%03d'|format(m.id) }} · {{ m.first_name }} {{ m.last_name }}{% if m.username %} · {{ m.username }}{% endif %}</span>
+                </label>
+                {% endfor %}
+              </div>
+              <div class="experience-actions">
+                <button class="secondary experience-select-all" type="button">Selecionar todos</button>
+                <button class="primary" type="submit">Preparar fila selecionada</button>
+                <small>Esta ação apenas cria um lote em rascunho.</small>
+              </div>
+            </form>
+            {% elif not p.target_url %}
+            <div class="experience-empty">Cadastre a URL do anúncio na seção de comentários antes de preparar a fila.</div>
+            {% else %}
+            <div class="experience-empty">Nenhum membro com feedback positivo confirmado para esta profissional.</div>
+            {% endif %}
+
+            {% for batch in p.batches %}
+            <div class="experience-batch">
+              <div class="experience-batch-heading">
+                <span>Lote #{{ batch.id }} · {{ batch.status }}</span>
+                <span>{{ batch.created_at }}</span>
+              </div>
+              {% if batch.status == 'DRAFT' %}
+              <form method="post" action="/member-experience/start" class="experience-actions">
+                <input type="hidden" name="batch_id" value="{{ batch.id }}">
+                <button class="ok" type="submit">Iniciar este lote agora</button>
+                <small>Login e Ajouter só começam após este clique.</small>
+              </form>
+              {% elif batch.status == 'RUNNING' %}
+              <small>Executor em andamento; acompanhe os registros abaixo.</small>
+              {% elif batch.status == 'FAILED' %}
+              <small class="error">Falha: {{ batch.last_error or 'verifique o log do executor' }}</small>
+              {% elif batch.status == 'COMPLETED' %}
+              <small class="ok">Todos os membros associados concluíram.</small>
+              {% endif %}
+              <ul class="experience-queue">
+                {% for item in batch["items"] %}
+                <li>
+                  <span>#{{ item.position }} · {{ item.first_name }} {{ item.last_name }}{% if item.username %} · {{ item.username }}{% endif %}</span>
+                  <span class="status">{{ item.status }}</span>
+                  {% if item.last_error %}<small>{{ item.last_error }}</small>{% endif %}
+                </li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endfor %}
+          </div>
+        </details>
+        {% endfor %}
+      </div>
+    </div>
+  </details>
+
+  {% if data.comments is defined %}
+  <details class="compact-section" id="professionals"><summary>Adicionar profissional</summary><div class="compact-body">
+    <h2>Adicionar novo profissional</h2>
+    <div class="card scout-create-card">
+      <p class="helper">Informe o nome exibido no anúncio e cole o link público correspondente.</p>
+      <form method="post" action="/comments/professionals/add" class="scout-form">
+        <label class="wide"><span>Nome da profissional</span><input type="text" name="professional_name" placeholder="Ex.: Brenda" required></label>
+        <label class="wide"><span>URL do anúncio</span><input type="url" name="target_url" placeholder="https://www.meslibertines.com/escort/..." required></label>
+        <div class="wide form-actions"><button class="primary" type="submit">Adicionar profissional</button></div>
+      </form>
+    </div>
+    <div class="cards">
+      {% for p in data.comments.professionals %}
+      <div class="card"><div class="num">{{ p.name }}</div><div class="label">{{ 'Ativa' if p.enabled else 'Inativa' }}</div><p><small>{{ p.target_url or 'Sem URL cadastrada' }}</small></p></div>
+      {% endfor %}
+    </div>
+  </div></details>
+
+  <details class="compact-section" id="comments"><summary>Comentários</summary><div class="compact-body">
+    <h2 class="compact-hide">Automação de comentários</h2>
+    <div class="card scout-create-card">
+      <h3>Fila de feedbacks genuínos</h3>
+      <p><a class="secondary" href="/comments/cloudflare-live">Abrir Cloudflare ao vivo na VPS</a></p>
+      <p class="helper">Máximo de 1 a cada {{ data.comments.professional_interval_hours }} horas por profissional, com pelo menos {{ data.comments.minimum_interval_minutes }} minutos entre envios. O agendamento só ocorre quando o anúncio e o autor real do feedback estiverem associados. {% if data.comments.require_author_confirmation %}O autor precisa confirmar antes do envio.{% else %}A gestão delegada autorizada coloca o comentário automaticamente na fila de envio.{% endif %} Após o envio confirmado, o Scout inicia automaticamente.</p>
+      <p class="helper"><strong>Fuso:</strong> {{ data.comments.timezone }} · <strong>Janela:</strong> {{ data.comments.window }}</p>
+    </div>
+    <div class="card scout-create-card manual-comment-card">
+      <h3>Atribuir comentário manualmente</h3>
+      <p class="helper">Cole o feedback, escolha a profissional e o membro autor. O comentário será salvo com as duas associações, mas não será enviado automaticamente.</p>
+      <form method="post" action="/comments/manual" class="scout-form">
+        <input type="hidden" name="feedback_kind" value="POSITIVE">
+        <label><span>Profissional</span>
+          <select name="professional_id" required>
+            <option value="">— selecionar profissional —</option>
+            {% for target in data.comments.professionals %}<option value="{{ target.id }}">{{ target.name }}</option>{% endfor %}
+          </select>
+        </label>
+        <label><span>Membro autor</span>
+          <select name="member_id" required>
+            <option value="">— selecionar membro —</option>
+            {% for m in data.comments.members %}<option value="{{ m.id }}">#{{ '%03d'|format(m.id) }} · {{ m.first_name }} {{ m.last_name }} · {{ m.username }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="wide"><span>Comentário</span><textarea name="comment_text" rows="4" required placeholder="Digite ou cole o feedback aqui..."></textarea></label>
+        <div class="wide form-actions"><button class="primary" type="submit">Salvar atribuição manual</button></div>
+      </form>
+    </div>
+    <div class="comment-professional-list">
+      {% for p in data.comments.professionals %}
+      <details class="comment-professional-group" id="comments-professional-{{ p.id }}">
+        <summary>
+          <span class="comment-professional-name">{{ p.name }}</span>
+          <span class="comment-professional-meta">{{ p.total }} comentários · {{ p.available or 0 }} disponíveis · {{ p.used or 0 }} usados</span>
+        </summary>
+        <div class="comment-professional-body">
+          <div class="comment-professional-toolbar">
+            <small>Autores associados: {{ p.mapped or 0 }}/{{ p.total }} · aguardando confirmação: {{ p.awaiting_confirmation or 0 }} · disponíveis: {{ p.available or 0 }}</small>
+            {% if p.next %}<small>Próximo: comentário #{{ p.next.source_no }} · {{ p.next.scheduled_for }}</small>{% endif %}
+          </div>
+          <form method="post" action="/comments/professional-url" class="comment-url-form">
+            <input type="hidden" name="name" value="{{ p.name }}">
+            <label><span>URL do anúncio</span><input type="url" name="target_url" value="{{ p.target_url or '' }}" placeholder="https://..." required></label>
+            <button class="secondary" type="submit">Salvar URL</button>
+          </form>
+
+          {% if p.rows %}
+          <div class="table-wrap">
+            <table class="comment-table">
+              <thead><tr><th>#</th><th>Faixa/registro</th><th>Feedback</th><th>Autor real</th><th>Status</th><th>Agendado</th><th>Erro</th></tr></thead>
+              <tbody>
+              {% for c in p.rows %}
+                <tr>
+                  <td>{{ c.source_no }}</td>
+                  <td><small>{{ c.age_band }}</small></td>
+                  <td class="scout-comment">{{ c.comment_text }}</td>
+                  <td>
+                    {% if c.status == 'AVAILABLE' %}
+                    <form method="post" action="/comments/{{ c.id }}/author" class="comment-author-form">
+                      <select name="member_id" class="comment-author-select" data-comment-id="{{ c.id }}">
+                        <option value="">— associar —</option>
+                        {% if c.author_member_id %}<option value="{{ c.author_member_id }}" selected>#{{ '%03d'|format(c.author_member_id) }} · {{ c.author_username }}</option>{% endif %}
+                        {% for m in data.comments.members %}{% if m.id != c.author_member_id %}<option value="{{ m.id }}">#{{ '%03d'|format(m.id) }} {{ m.first_name }} {{ m.last_name }} · {{ m.username }}</option>{% endif %}{% endfor %}
+                      </select>
+                      <small class="comment-author-state">{% if c.author_member_id %}✓ atribuído{% endif %}</small>
+                    </form>
+                    {% else %}<small>{{ c.author_username or '—' }}</small>{% endif %}
+                  </td>
+                  <td>
+                    <span class="status">{% if c.status == 'SUBMITTED_MODERATION' %}ENVIADO À MODERAÇÃO{% elif c.submitted_at %}ENVIADO · SCOUT ATIVO{% elif c.status == 'AVAILABLE' and c.scheduled_for %}NA FILA PARA ENVIO{% elif c.status == 'AVAILABLE' %}DISPONÍVEL PARA USO{% elif c.status == 'AWAITING_CONFIRMATION' %}AGUARDANDO CONFIRMAÇÃO{% elif c.status == 'USED' %}JÁ USADO{% else %}{{ c.status }}{% endif %}</span>
+                    {% if c.status == 'AWAITING_CONFIRMATION' and c.author_member_id and not c.confirmed_at and not c.submitted_at %}
+                    <form method="post" action="/comments/{{ c.id }}/confirm" class="comment-confirm-form">
+                      <input type="hidden" name="member_id" value="{{ c.author_member_id }}">
+                      <label><input type="checkbox" name="confirm" value="yes" required> Eu confirmo este texto e autorizo a publicação.</label>
+                      <button type="submit" class="primary">Confirmar publicação</button>
+                    </form>
+                    {% endif %}
+                  </td>
+                  <td><small>{{ c.scheduled_for or '—' }}</small></td>
+                  <td><small>{{ c.last_error or '—' }}</small></td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <div class="notice">Nenhum comentário cadastrado para {{ p.name }}.</div>
+          {% endif %}
+        </div>
+      </details>
+      {% endfor %}
+    </div>
+  </div>
+
+  </div></details>
+
+  <details class="compact-section" id="negative-professionals"><summary>Adicionar profissional — feedbacks negativos</summary><div class="compact-body">
+    <h2>Adicionar profissional mal avaliada</h2>
+    <div class="card scout-create-card">
+      <p class="helper">Informe o nome exibido no anúncio e cole o link público correspondente. Esta fila não será misturada à fila de feedbacks positivos.</p>
+      <form method="post" action="/negative-comments/professionals/add" class="scout-form">
+        <label class="wide"><span>Nome da profissional</span><input type="text" name="professional_name" placeholder="Ex.: Taty" required></label>
+        <label class="wide"><span>URL do anúncio</span><input type="url" name="target_url" placeholder="https://www.meslibertines.com/escort/..." required></label>
+        <div class="wide form-actions"><button class="primary" type="submit">Adicionar à fila negativa</button></div>
+      </form>
+    </div>
+    <div class="cards">
+      {% for p in data.negative_comments.professionals %}
+      <div class="card"><div class="num">{{ p.name }}</div><div class="label">{{ 'Ativa' if p.enabled else 'Inativa' }}</div><p><small>{{ p.target_url or 'Sem URL cadastrada' }}</small></p></div>
+      {% else %}
+      <div class="notice">Nenhuma profissional foi cadastrada na fila negativa.</div>
+      {% endfor %}
+    </div>
+  </div></details>
+
+  <details class="compact-section" id="negative-comments"><summary>Feedbacks negativos</summary><div class="compact-body">
+    <h2 class="compact-hide">Automação de feedbacks negativos</h2>
+    <div class="card scout-create-card">
+      <h3>Fila separada de feedbacks ruins</h3>
+      <p class="helper">Somente os textos importados como NEGATIVE aparecem aqui. Os feedbacks positivos e as profissionais já cadastradas na fila positiva continuam separados.</p>
+      <p class="helper"><strong>Fuso:</strong> {{ data.negative_comments.timezone }} · <strong>Janela:</strong> {{ data.negative_comments.window }}</p>
+    </div>
+    <div class="card scout-create-card manual-comment-card">
+      <h3>Atribuir feedback negativo manualmente</h3>
+      <p class="helper">Escolha o anúncio negativo e o membro autor. O feedback ficará salvo e atribuído, sem iniciar envio automático.</p>
+      <form method="post" action="/comments/manual" class="scout-form">
+        <input type="hidden" name="feedback_kind" value="NEGATIVE">
+        <label><span>Profissional</span>
+          <select name="professional_id" required>
+            <option value="">— selecionar profissional —</option>
+            {% for target in data.negative_comments.professionals %}{% if not target.is_unassigned %}<option value="{{ target.id }}">{{ target.name }}</option>{% endif %}{% endfor %}
+          </select>
+        </label>
+        <label><span>Membro autor</span>
+          <select name="member_id" required>
+            <option value="">— selecionar membro —</option>
+            {% for m in data.negative_comments.members %}<option value="{{ m.id }}">#{{ '%03d'|format(m.id) }} · {{ m.first_name }} {{ m.last_name }} · {{ m.username }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="wide"><span>Feedback negativo</span><textarea name="comment_text" rows="4" required placeholder="Digite ou cole o feedback aqui..."></textarea></label>
+        <div class="wide form-actions"><button class="primary" type="submit">Salvar atribuição manual</button></div>
+      </form>
+    </div>
+    <div class="comment-professional-list">
+      {% for p in data.negative_comments.professionals %}
+      <details class="comment-professional-group" id="negative-comments-professional-{{ p.id }}">
+        <summary>
+          <span class="comment-professional-name">{% if p.is_unassigned %}Pool sem anúncio vinculado{% else %}{{ p.name }}{% endif %}</span>
+          <span class="comment-professional-meta">{{ p.total }} feedbacks · {{ p.available or 0 }} disponíveis · {{ p.used or 0 }} usados</span>
+        </summary>
+        <div class="comment-professional-body">
+          <div class="comment-professional-toolbar">
+            <small>Autores associados: {{ p.mapped or 0 }}/{{ p.total }} · aguardando confirmação: {{ p.awaiting_confirmation or 0 }} · disponíveis: {{ p.available or 0 }}</small>
+            {% if p.next %}<small>Próximo: comentário #{{ p.next.source_no }} · {{ p.next.scheduled_for }}</small>{% endif %}
+          </div>
+          {% if not p.is_unassigned %}
+          <form method="post" action="/negative-comments/professional-url" class="comment-url-form">
+            <input type="hidden" name="name" value="{{ p.name }}">
+            <label><span>URL do anúncio</span><input type="url" name="target_url" value="{{ p.target_url or '' }}" placeholder="https://..." required></label>
+            <button class="secondary" type="submit">Salvar URL</button>
+          </form>
+          {% else %}
+          <p class="helper">Esses feedbacks aguardam o vínculo com um anúncio negativo. Escolha a profissional em cada linha abaixo.</p>
+          {% if p.rows %}
+          <form method="post" action="/negative-comments/bulk-professional" id="negative-comment-bulk-form-{{ p.id }}" class="comment-url-form negative-comment-bulk-form">
+            <label><span>Profissional para os selecionados</span>
+              <select name="professional_id" required>
+                <option value="">— selecionar profissional —</option>
+                {% for target in data.negative_comments.professionals %}
+                  {% if not target.is_unassigned %}
+                  <option value="{{ target.id }}">{{ target.name }}</option>
+                  {% endif %}
+                {% endfor %}
+              </select>
+            </label>
+            <button class="primary" type="submit">Vincular selecionados</button>
+            <button class="secondary negative-comment-select-all" type="button" data-form-id="negative-comment-bulk-form-{{ p.id }}">Selecionar todos</button>
+            <small>Marque os feedbacks abaixo e escolha o anúncio uma única vez.</small>
+          </form>
+          {% endif %}
+          {% endif %}
+
+          {% if p.rows %}
+          <div class="table-wrap">
+            <table class="comment-table">
+              <thead><tr><th>#</th><th>Faixa/registro</th><th>Feedback negativo</th><th>Autor real</th><th>Status</th><th>Agendado</th><th>Erro</th></tr></thead>
+              <tbody>
+              {% for c in p.rows %}
+                <tr>
+                  <td>
+                    {% if p.is_unassigned and c.status == 'AVAILABLE' %}
+                    <input type="checkbox" class="negative-comment-select" data-bulk-form="negative-comment-bulk-form-{{ p.id }}" form="negative-comment-bulk-form-{{ p.id }}" name="comment_id" value="{{ c.id }}" aria-label="Selecionar feedback #{{ c.source_no }}">
+                    {% endif %}
+                    {{ c.source_no }}
+                  </td>
+                  <td><small>{{ c.age_band }}</small></td>
+                  <td class="scout-comment">
+                    {{ c.comment_text }}
+                    {% if p.is_unassigned and c.status == 'AVAILABLE' %}
+                    <form method="post" action="/negative-comments/{{ c.id }}/professional" class="comment-url-form">
+                      <label><span>Vincular ao anúncio negativo</span>
+                        <select name="professional_id" required>
+                          <option value="">— selecionar profissional —</option>
+                          {% for target in data.negative_comments.professionals %}
+                            {% if not target.is_unassigned %}
+                            <option value="{{ target.id }}">{{ target.name }}</option>
+                            {% endif %}
+                          {% endfor %}
+                        </select>
+                      </label>
+                      <button class="secondary" type="submit">Vincular</button>
+                    </form>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if c.status == 'AVAILABLE' %}
+                    <form method="post" action="/comments/{{ c.id }}/author" class="comment-author-form">
+                      <select name="member_id" class="comment-author-select" data-comment-id="{{ c.id }}">
+                        <option value="">— associar —</option>
+                        {% if c.author_member_id %}<option value="{{ c.author_member_id }}" selected>#{{ '%03d'|format(c.author_member_id) }} · {{ c.author_username }}</option>{% endif %}
+                        {% for m in data.negative_comments.members %}{% if m.id != c.author_member_id %}<option value="{{ m.id }}">#{{ '%03d'|format(m.id) }} {{ m.first_name }} {{ m.last_name }} · {{ m.username }}</option>{% endif %}{% endfor %}
+                      </select>
+                      <small class="comment-author-state">{% if c.author_member_id %}✓ atribuído{% endif %}</small>
+                    </form>
+                    {% else %}<small>{{ c.author_username or '—' }}</small>{% endif %}
+                  </td>
+                  <td>
+                    <span class="status">{% if c.status == 'SUBMITTED_MODERATION' %}ENVIADO À MODERAÇÃO{% elif c.submitted_at %}ENVIADO · SCOUT ATIVO{% elif c.status == 'AVAILABLE' and c.scheduled_for %}NA FILA PARA ENVIO{% elif c.status == 'AVAILABLE' %}DISPONÍVEL PARA USO{% elif c.status == 'AWAITING_CONFIRMATION' %}AGUARDANDO CONFIRMAÇÃO{% elif c.status == 'USED' %}JÁ USADO{% else %}{{ c.status }}{% endif %}</span>
+                    {% if c.status == 'AWAITING_CONFIRMATION' and c.author_member_id and not c.confirmed_at and not c.submitted_at %}
+                    <form method="post" action="/comments/{{ c.id }}/confirm" class="comment-confirm-form">
+                      <input type="hidden" name="member_id" value="{{ c.author_member_id }}">
+                      <label><input type="checkbox" name="confirm" value="yes" required> Eu confirmo este texto e autorizo a publicação.</label>
+                      <button type="submit" class="primary">Confirmar publicação</button>
+                    </form>
+                    {% endif %}
+                  </td>
+                  <td><small>{{ c.scheduled_for or '—' }}</small></td>
+                  <td><small>{{ c.last_error or '—' }}</small></td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <div class="notice">Nenhum feedback negativo cadastrado para {{ p.name }}.</div>
+          {% endif %}
+        </div>
+      </details>
+      {% else %}
+      <div class="notice">Nenhuma profissional está cadastrada na fila negativa.</div>
+      {% endfor %}
+    </div>
+  </div></details>
+  {% endif %}
+
+  <details class="compact-section" id="scout"><summary>Scout de comentários</summary><div class="compact-body">
+    <h2>Scout de comentários</h2>
+    <div class="cards">
+      <div class="card"><div class="num">{{ data.scout.active }}</div><div class="label">Scouts ativos</div></div>
+      <div class="card"><div class="num">{{ data.scout.found }}</div><div class="label">Comentários encontrados</div></div>
+      <div class="card"><div class="num">{{ data.scout.expired }}</div><div class="label">Expirados / não encontrados</div></div>
+      <div class="card"><div class="num">{{ data.scout.error }}</div><div class="label">Erros técnicos</div></div>
+    </div>
+
+    <div class="card scout-create-card">
+      <h3>Registrar comentário já publicado</h3>
+      <p class="helper">Use este formulário somente depois que o comentário tiver sido enviado/publicado. Ao registrar, o Scout é criado imediatamente e fará no máximo 2 verificações: 6 horas e 8 horas após a publicação. Se encontrar na primeira, encerra automaticamente.</p>
+
+      {% if data.scout_members %}
+      <form method="post" action="/scouts/register-published-comment" class="scout-form">
+        <label>
+          <span>Membro / conta</span>
+          <select name="member_id" required>
+            <option value="">Selecione...</option>
+            {% for m in data.scout_members %}
+              <option value="{{ m.id }}">#{{ "%03d"|format(m.id) }} — {{ m.first_name }} {{ m.last_name }} — {{ m.username }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label>
+          <span>Título do anúncio</span>
+          <input type="text" name="advertisement_title" maxlength="250" required placeholder="Ex.: Massage Bien-être Paris">
+        </label>
+
+        <label class="wide">
+          <span>URL do anúncio</span>
+          <input type="url" name="target_url" required placeholder="https://...">
+        </label>
+
+        <label class="wide">
+          <span>Texto exato do comentário publicado</span>
+          <textarea name="comment_text" rows="4" required placeholder="Cole aqui exatamente o comentário que foi publicado."></textarea>
+        </label>
+
+        <div class="wide form-actions">
+          <button class="primary" type="submit">Registrar publicação e iniciar Scout</button>
+          <small>Primeira checagem: +6h · segunda: +8h · máximo: 2 checagens.</small>
+        </div>
+      </form>
+      {% else %}
+        <div class="notice">Ainda não há uma conta elegível para associar a um comentário. A conta precisa já ter sido criada e possuir username.</div>
+      {% endif %}
+    </div>
+
+    {% if data.scout.rows %}
+    <table>
+      <thead>
+        <tr>
+          <th>Scout</th>
+          <th>Membro</th>
+          <th>Anúncio</th>
+          <th>Comentário monitorado</th>
+          <th>Status</th>
+          <th>Checagens</th>
+          <th>Próxima</th>
+          <th>Último erro</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in data.scout.rows %}
+        <tr class="{% if s.status == 'FOUND' %}scout-found{% elif s.status == 'EXPIRED' %}scout-expired{% elif s.status == 'ERROR' %}scout-error{% endif %}">
+          <td>#{{ s.id }}</td>
+          <td>{{ s.first_name }} {{ s.last_name }}<br><small>{{ s.username or "—" }}</small></td>
+          <td>
+            {{ s.advertisement_title }}<br>
+            <small><a href="{{ s.target_url }}" target="_blank" rel="noopener noreferrer">Abrir anúncio</a></small>
+          </td>
+          <td class="scout-comment">{{ s.expected_comment }}</td>
+          <td><span class="status">{{ s.status }}</span></td>
+          <td>{{ s.checks_done }}/{{ s.max_checks }}</td>
+          <td><small>{{ s.next_check_at or "—" }}</small></td>
+          <td><small>{{ s.last_error or "—" }}</small></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="card"><small>Nenhum Scout criado ainda. Registre acima um comentário que já tenha sido publicado.</small></div>
+    {% endif %}
+  </div>
+
+  </div></details>
+
+  <details class="compact-section" id="dissatisfied-members"><summary>Membros insatisfeitos · {{ data.dissatisfied_members|length }}</summary><div class="compact-body">
+    <h2>Separar membros insatisfeitos</h2>
+    <p class="helper">Membros marcados aqui ficam fora das filas de comentários positivos e negativos. Membros que já possuem comentário positivo associado não aparecem como elegíveis e também não podem ser marcados.</p>
+
+    {% if data.comment_eligible_members %}
+    <form method="post" action="/members/dissatisfied/mark" class="scout-form">
+      <label>
+        <span>Membro</span>
+        <select name="member_id" required>
+          <option value="">Selecione um membro</option>
+          {% for m in data.comment_eligible_members %}
+          <option value="{{ m.id }}">#{{ "%03d"|format(m.id) }} · {{ m.first_name }} {{ m.last_name }}{% if m.username %} · {{ m.username }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>Motivo (opcional)</span>
+        <input type="text" name="reason" maxlength="500" placeholder="Ex.: relatou experiência insatisfatória">
+      </label>
+      <div class="wide form-actions"><button class="primary" type="submit">Marcar como insatisfeito</button></div>
+    </form>
+    {% else %}
+    <div class="notice">Nenhum membro está disponível para ser marcado agora. Membros já associados a comentários e membros com comentário positivo ficam fora desta lista.</div>
+    {% endif %}
+
+    {% if data.dissatisfied_members %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Membro</th><th>Username</th><th>Motivo</th><th>Marcado em</th><th>Ação</th></tr></thead>
+        <tbody>
+        {% for m in data.dissatisfied_members %}
+          <tr>
+            <td>#{{ "%03d"|format(m.id) }}</td>
+            <td>{{ m.first_name }} {{ m.last_name }}</td>
+            <td>{{ m.username or "—" }}</td>
+            <td><small>{{ m.dissatisfied_reason or "—" }}</small></td>
+            <td><small>{{ m.dissatisfied_at or "—" }}</small></td>
+            <td>
+              <form method="post" action="/members/{{ m.id }}/dissatisfied/unmark">
+                <button class="secondary" type="submit">Retirar separação</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="notice">Nenhum membro foi marcado como insatisfeito.</div>
+    {% endif %}
+  </div></details>
+
+  <details class="compact-section" id="members"><summary>Membros</summary><div class="compact-body">
+    <h2>Membros</h2>
+    <div class="promising-tools">
+      <form method="post" action="/members/activate-pending-profiles">
+        {% if data.profile_activation_running %}
+          <button class="secondary disabled" type="submit" disabled>Ativando perfis pendentes...</button>
+        {% elif data.profile_pending %}
+          <button id="activate-pending-profiles" class="primary" type="submit">Ativar todos os perfis pendentes ({{ data.profile_pending }})</button>
+        {% else %}
+          <button class="ok disabled" type="submit" disabled>Nenhum perfil pendente</button>
+        {% endif %}
+      </form>
+    </div>
+    <input id="member-search" type="search" placeholder="Buscar membro, usuário, email ou cidade…" aria-label="Buscar membros">
+  <div class="table-wrap"><table id="members-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Membro</th>
+        <th>Username</th>
+        <th>Email</th>
+        <th>Cadastro</th>
+        <th>Destino</th>
+        <th>Email</th>
+        <th>Perfil</th>
+        <th>Último erro</th>
+        <th>Ações</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for m in data.members %}
+      <tr data-member-id="{{ m.id }}">
+        <td>#{{ "%03d"|format(m.id) }}</td>
+        <td>{{ m.first_name }} {{ m.last_name }}<br><small>{{ m.birth_date }} · {{ m.city_france }}</small></td>
+        <td>{{ m.username or "—" }}</td>
+        <td>{{ m.email or "—" }}</td>
+        <td><span class="status member-registration-status">{{ m.registration_status }}</span></td>
+        <td><small>{{ m.registration_target or "—" }}{% if m.registration_route %} · {{ m.registration_route }}{% endif %}{% if m.registration_worker_action %}<br>worker: {{ m.registration_worker_action }}{% endif %}</small></td>
+        <td><span class="status member-email-status">{{ m.email_status }}</span></td>
+        <td><span class="status member-profile-status">{{ m.profile_status }}</span></td>
+        <td><small class="member-last-error">{{ m.last_error or "—" }}</small></td>
+        <td>
+          <div class="member-action-controls">
+            {% if m.registration_status in ["FORM_PREPARED", "MANUAL_INTERVENTION"] %}
+              <form method="post" action="/members/{{ m.id }}/account-created">
+                <button class="ok" type="submit">✓ Conta criada</button>
+              </form>
+            {% endif %}
+
+            {% if m.registration_status == "WAITING_EMAIL_CONFIRMATION" %}
+              <form method="post" action="/members/{{ m.id }}/email-confirmed" class="member-action-form email-confirm-form" data-member-action="email-confirmed">
+                <button class="ok" type="submit">✓ Email confirmado</button>
+              </form>
+            {% endif %}
+
+            {% if m.registration_status in ["SELECTED", "FORM_PREPARING", "MANUAL_INTERVENTION"] %}
+              <form method="post" action="/members/{{ m.id }}/reset">
+                <button class="secondary" type="submit">Voltar a PENDING</button>
+              </form>
+            {% endif %}
+
+            <div data-profile-activation-action>
+              {% if m.email_status == "CONFIRMED" and m.profile_status in ["PENDING", "MANUAL_INTERVENTION"] %}
+                <form method="post" action="/members/{{ m.id }}/activate-profile" class="member-action-form activate-profile-form" data-member-action="activate-profile">
+                  <button class="primary" type="submit">Ativar perfil</button>
+                </form>
+              {% elif m.profile_status == "ACTIVATING" %}
+                <button class="secondary disabled" data-profile-state="ACTIVATING" disabled>Ativando perfil...</button>
+              {% elif m.profile_status == "COMPLETE" %}
+                <button class="ok disabled" data-profile-state="COMPLETE" disabled>✓ Perfil completo</button>
+              {% endif %}
+            </div>
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  </div></details>
+</div>
+
+<script>
+const memberSearch=document.getElementById('member-search');
+if(memberSearch){memberSearch.addEventListener('input',()=>{const q=memberSearch.value.trim().toLocaleLowerCase('pt-BR');document.querySelectorAll('#members-table tbody tr').forEach(row=>{row.style.display=!q||row.innerText.toLocaleLowerCase('pt-BR').includes(q)?'':'none';});});}
+
+document.querySelectorAll('.experience-select-all').forEach(button => {
+  const form = button.closest('form');
+  const checkboxes = form
+    ? [...form.querySelectorAll('input[name="member_id"]')]
+    : [];
+
+  const refreshLabel = () => {
+    const allSelected = checkboxes.length > 0
+      && checkboxes.every(checkbox => checkbox.checked);
+    button.textContent = allSelected ? 'Desmarcar todos' : 'Selecionar todos';
+    button.setAttribute('aria-pressed', allSelected ? 'true' : 'false');
+  };
+
+  button.addEventListener('click', () => {
+    const allSelected = checkboxes.length > 0
+      && checkboxes.every(checkbox => checkbox.checked);
+    checkboxes.forEach(checkbox => {
+      checkbox.checked = !allSelected;
+    });
+    refreshLabel();
+  });
+
+  checkboxes.forEach(checkbox => {
+    checkbox.addEventListener('change', refreshLabel);
+  });
+  refreshLabel();
+});
+
+document.querySelectorAll('.negative-comment-select-all').forEach(button => {
+  const formId = button.dataset.formId;
+  const getCheckboxes = () => [
+    ...document.querySelectorAll('input.negative-comment-select[data-bulk-form="' + formId + '"]')
+  ];
+  const refreshLabel = () => {
+    const checkboxes = getCheckboxes();
+    const allSelected = checkboxes.length > 0 && checkboxes.every(checkbox => checkbox.checked);
+    button.textContent = allSelected ? 'Desmarcar todos' : 'Selecionar todos';
+  };
+  button.addEventListener('click', () => {
+    const checkboxes = getCheckboxes();
+    const allSelected = checkboxes.length > 0 && checkboxes.every(checkbox => checkbox.checked);
+    checkboxes.forEach(checkbox => { checkbox.checked = !allSelected; });
+    refreshLabel();
+  });
+  getCheckboxes().forEach(checkbox => checkbox.addEventListener('change', refreshLabel));
+  refreshLabel();
+});
+
+const memberActionPollers = new Map();
+
+function getMemberRow(memberId) {
+  return [...document.querySelectorAll('#members-table tbody tr[data-member-id]')]
+    .find(row => row.dataset.memberId === String(memberId));
+}
+
+function setMemberStatus(row, selector, value) {
+  const element = row ? row.querySelector(selector) : null;
+  if (element && value !== undefined && value !== null) element.textContent = value;
+}
+
+function setMemberError(row, value) {
+  const element = row ? row.querySelector('.member-last-error') : null;
+  if (element) element.textContent = value || '—';
+}
+
+function updateMemberStatus(row, data, profileStatus) {
+  setMemberStatus(row, '.member-registration-status', data.registration_status);
+  setMemberStatus(row, '.member-email-status', data.email_status);
+  setMemberStatus(row, '.member-profile-status', profileStatus || data.profile_status);
+  setMemberError(row, data.last_error);
+}
+
+function setProfileAction(row, profileStatus) {
+  const slot = row ? row.querySelector('[data-profile-activation-action]') : null;
+  if (!slot) return;
+  slot.replaceChildren();
+  const memberId = row.dataset.memberId;
+
+  if (profileStatus === 'COMPLETE') {
+    const button = document.createElement('button');
+    button.className = 'ok disabled';
+    button.dataset.profileState = 'COMPLETE';
+    button.disabled = true;
+    button.textContent = '✓ Perfil completo';
+    slot.appendChild(button);
+    return;
+  }
+
+  if (profileStatus === 'ACTIVATING') {
+    const button = document.createElement('button');
+    button.className = 'secondary disabled';
+    button.dataset.profileState = 'ACTIVATING';
+    button.disabled = true;
+    button.textContent = 'Ativando perfil...';
+    slot.appendChild(button);
+    return;
+  }
+
+  if (profileStatus !== 'PENDING' && profileStatus !== 'MANUAL_INTERVENTION') return;
+
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = '/members/' + memberId + '/activate-profile';
+  form.className = 'member-action-form activate-profile-form';
+  form.dataset.memberAction = 'activate-profile';
+  const button = document.createElement('button');
+  button.className = 'primary';
+  button.type = 'submit';
+  button.textContent = 'Ativar perfil';
+  form.appendChild(button);
+  slot.appendChild(form);
+}
+
+function showMemberActionMessage(message, isError) {
+  let element = document.getElementById('member-action-feedback');
+  if (!element) {
+    element = document.createElement('div');
+    element.id = 'member-action-feedback';
+    const members = document.getElementById('members');
+    const host = (members && members.querySelector('.compact-body')) ||
+      document.querySelector('.wrap') || document.body;
+    host.prepend(element);
+  }
+  element.className = isError ? 'error' : 'msg';
+  element.textContent = message;
+  element.hidden = false;
+}
+
+function stopMemberStatusWatch(memberId) {
+  const key = String(memberId);
+  const timer = memberActionPollers.get(key);
+  if (timer) window.clearTimeout(timer);
+  memberActionPollers.delete(key);
+}
+
+function scheduleMemberStatusWatch(memberId, callback, delay) {
+  const timer = window.setTimeout(callback, delay);
+  memberActionPollers.set(String(memberId), timer);
+}
+
+function watchMemberStatus(memberId) {
+  stopMemberStatusWatch(memberId);
+  let attempts = 0;
+  const startedAt = Date.now();
+
+  const poll = async () => {
+    attempts += 1;
+    const row = getMemberRow(memberId);
+    if (!row) {
+      stopMemberStatusWatch(memberId);
+      return;
+    }
+
+    try {
+      const statusUrl = '/members/' + memberId + '/status';
+      const response = await fetch(statusUrl, {
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest',
+          'Accept': 'application/json'
+        }
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || 'Falha ao consultar o status do membro.');
+      }
+
+      const rawProfileStatus = data.profile_status;
+      const optimistic = rawProfileStatus === 'PENDING' && Date.now() - startedAt < 10000;
+      const profileStatus = optimistic ? 'ACTIVATING' : rawProfileStatus;
+      updateMemberStatus(row, data, profileStatus);
+      setProfileAction(row, profileStatus);
+
+      if (rawProfileStatus === 'COMPLETE') {
+        stopMemberStatusWatch(memberId);
+        showMemberActionMessage('Perfil ativado com sucesso.', false);
+        return;
+      }
+
+      if (rawProfileStatus === 'MANUAL_INTERVENTION') {
+        stopMemberStatusWatch(memberId);
+        showMemberActionMessage('A ativação requer intervenção manual.', true);
+        return;
+      }
+
+      if (!optimistic && rawProfileStatus !== 'ACTIVATING') {
+        stopMemberStatusWatch(memberId);
+        if (rawProfileStatus === 'PENDING') {
+          showMemberActionMessage('A ativação não confirmou o início; o botão foi liberado para nova tentativa.', true);
+        }
+        return;
+      }
+
+      if (attempts >= 60) {
+        stopMemberStatusWatch(memberId);
+        setMemberError(row, 'A ativação ainda está em andamento; consulte novamente.');
+        showMemberActionMessage('A ativação ainda está em andamento.', true);
+        return;
+      }
+    } catch (error) {
+      if (attempts >= 60) {
+        stopMemberStatusWatch(memberId);
+        setMemberError(row, error.message);
+        showMemberActionMessage(error.message, true);
+        return;
+      }
+    }
+
+    scheduleMemberStatusWatch(memberId, poll, 1500);
+  };
+
+  poll();
+}
+
+document.addEventListener('submit', async event => {
+  const form = event.target && event.target.closest
+    ? event.target.closest('form[data-member-action]')
+    : null;
+  if (!form) return;
+  event.preventDefault();
+
+  const row = form.closest('tr[data-member-id]');
+  const memberId = row ? row.dataset.memberId : '';
+  if (!row || !memberId) return;
+
+  const button = form.querySelector('button[type="submit"]');
+  const originalText = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Processando...';
+  }
+
+  try {
+    const response = await fetch(form.action, {
+      method: 'POST',
+      headers: {
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': 'application/json'
+      }
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'Falha ao executar a ação.');
+    }
+
+    const action = form.dataset.memberAction;
+    if (action === 'email-confirmed') {
+      updateMemberStatus(row, data, 'ACTIVATING');
+      form.remove();
+      setProfileAction(row, 'ACTIVATING');
+      showMemberActionMessage(data.message || 'Email confirmado.', false);
+    } else if (action === 'activate-profile') {
+      updateMemberStatus(row, data, 'ACTIVATING');
+      setProfileAction(row, 'ACTIVATING');
+      showMemberActionMessage(data.message || 'Ativação do perfil iniciada.', false);
+    }
+    watchMemberStatus(memberId);
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+    showMemberActionMessage(error.message, true);
+  }
+});
+
+function showCommentConfirmation(select, memberId) {
+  const row = select.closest('tr');
+  const statusCell = row ? row.querySelector('.status').closest('td') : null;
+  if (!statusCell) return;
+  const statusEl = statusCell.querySelector('.status');
+  const existing = statusCell.querySelector('.comment-confirm-form');
+  if (!memberId) {
+    statusEl.textContent = 'DISPONÍVEL PARA USO';
+    if (existing) existing.remove();
+    return;
+  }
+  statusEl.textContent = 'AGUARDANDO CONFIRMAÇÃO';
+  if (existing) return;
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = '/comments/' + select.dataset.commentId + '/confirm';
+  form.className = 'comment-confirm-form';
+  const memberInput = document.createElement('input');
+  memberInput.type = 'hidden';
+  memberInput.name = 'member_id';
+  memberInput.value = memberId;
+  const label = document.createElement('label');
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.name = 'confirm';
+  checkbox.value = 'yes';
+  checkbox.required = true;
+  label.append(checkbox, document.createTextNode(' Eu confirmo este texto e autorizo a publicação.'));
+  const button = document.createElement('button');
+  button.type = 'submit';
+  button.className = 'primary';
+  button.textContent = 'Confirmar publicação';
+  form.append(memberInput, label, button);
+  statusCell.appendChild(form);
+}
+
+function showCommentQueued(select) {
+  const row = select.closest('tr');
+  const statusCell = row ? row.querySelector('.status').closest('td') : null;
+  if (!statusCell) return;
+  const statusEl = statusCell.querySelector('.status');
+  const existing = statusCell.querySelector('.comment-confirm-form');
+  statusEl.textContent = 'NA FILA PARA ENVIO';
+  if (existing) existing.remove();
+}
+
+document.querySelectorAll('.comment-author-select').forEach(select=>{
+  select.dataset.previousValue=select.value;
+  select.addEventListener('change', async ()=>{
+    const form=select.closest('form');
+    const state=form.querySelector('.comment-author-state');
+    const previous=select.dataset.previousValue || '';
+    const chosen=select.value;
+    const body=new URLSearchParams(new FormData(form));
+    select.disabled=true;
+    state.textContent='salvando…';
+    try{
+      const response=await fetch(form.action,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest','Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body});
+      const data=await response.json();
+      if(!response.ok || !data.ok) throw new Error(data.error || 'Falha ao salvar');
+      select.dataset.previousValue=chosen;
+      state.textContent=chosen ? '✓ atribuído' : 'removido';
+      if(!chosen){
+        showCommentConfirmation(select, chosen);
+      }else if (data.requires_confirmation){
+        showCommentConfirmation(select, chosen);
+      }else{
+        showCommentQueued(select);
+      }
+      if(chosen){
+        document.querySelectorAll('.comment-author-select').forEach(other=>{
+          if(other===select) return;
+          const option=other.querySelector(`option[value="${CSS.escape(chosen)}"]`);
+          if(option && !option.selected) option.remove();
+        });
+      }
+    }catch(err){
+      select.value=previous;
+      state.textContent='erro: '+err.message;
+    }finally{
+      select.disabled=false;
+    }
+  });
+});
+
+
+const promisingSearch = document.getElementById('promising-search');
+if (promisingSearch) {
+  const entries = [...document.querySelectorAll('.promising-entry')];
+  promisingSearch.addEventListener('input', () => {
+    const query = promisingSearch.value.trim().toLocaleLowerCase('pt-BR');
+    let visible = 0;
+    entries.forEach(entry => {
+      entry.hidden = !entry.textContent.toLocaleLowerCase('pt-BR').includes(query);
+      if (!entry.hidden) visible++;
+    });
+    document.getElementById('promising-count').textContent = visible + ' membros';
+    document.getElementById('promising-empty').hidden = visible !== 0;
+  });
+}
+document.querySelector('a[href="#promising-members"]').addEventListener('click', () => {
+  document.getElementById('promising-members').open = true;
+});
+
+</script>
+
+</body>
+</html>

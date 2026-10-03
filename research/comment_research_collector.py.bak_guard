@@ -1,0 +1,471 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import html
+import json
+import re
+import sqlite3
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path('/home/matheus/meslibertines_manager_v1')
+RESEARCH = ROOT / 'research'
+DB_PATH = RESEARCH / 'comment_research.db'
+MAIN_DB = ROOT / 'data' / 'members.db'
+SITEMAP_CACHE = RESEARCH / 'sitemap_alt.xml'
+STATUS_JSON = RESEARCH / 'status.json'
+EXPORT_JSON = RESEARCH / 'qualified_comments.json'
+EXPORT_CSV = RESEARCH / 'qualified_comments.csv'
+TARGET = 200
+MIN_SCORE = 8.0
+USER_AGENT = 'MesLibertinesResearch/1.0 (public pages; rate-limit respectful)'
+BASE = 'https://www.meslibertines.com'
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(dt: datetime | None = None) -> str:
+    return (dt or utc_now()).isoformat(timespec='seconds')
+
+
+def connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    RESEARCH.mkdir(parents=True, exist_ok=True)
+    with connect() as conn:
+        conn.executescript('''
+        CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS queue(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL UNIQUE,
+            section_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            added_at TEXT NOT NULL,
+            checked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_research_queue_status ON queue(status,id);
+        ''')
+        conn.executescript('''
+        CREATE TABLE IF NOT EXISTS candidates(
+            profile_hash TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL UNIQUE,
+            score REAL NOT NULL,
+            date_text TEXT,
+            comment TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            section_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS seen_comments(
+            comment_hash TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            level TEXT NOT NULL,
+            message TEXT NOT NULL
+        );
+        ''')
+
+
+def get_state(conn: sqlite3.Connection, key: str, default: str = '') -> str:
+    row = conn.execute('SELECT value FROM state WHERE key=?', (key,)).fetchone()
+    return row['value'] if row else default
+
+
+def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        'INSERT INTO state(key,value) VALUES(?,?) '
+        'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        (key, value),
+    )
+
+def log_event(conn: sqlite3.Connection, level: str, message: str) -> None:
+    conn.execute(
+        'INSERT INTO events(created_at,level,message) VALUES(?,?,?)',
+        (iso(), level, message[:1000]),
+    )
+    print(f'{level}: {message}', flush=True)
+
+
+def main_site_busy() -> tuple[bool, str]:
+    if not MAIN_DB.exists():
+        return False, ''
+    conn = sqlite3.connect(MAIN_DB, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        active_scout = conn.execute(
+            "SELECT COUNT(*) n FROM comment_scouts WHERE status='ACTIVE'"
+        ).fetchone()['n']
+        awaiting = conn.execute(
+            "SELECT COUNT(*) n FROM comment_bank WHERE status='AWAITING_CONFIRMATION'"
+        ).fetchone()['n']
+        active_reg = conn.execute(
+            "SELECT COUNT(*) n FROM members WHERE registration_status IN ('SELECTED','FORM_PREPARING')"
+        ).fetchone()['n']
+        if active_scout or awaiting or active_reg:
+            return True, f'operacao ativa: scouts={active_scout}, comentarios={awaiting}, cadastros={active_reg}'
+
+        recent = conn.execute(
+            "SELECT MAX(ts) ts FROM ("
+            "SELECT account_created_at ts FROM members WHERE account_created_at IS NOT NULL "
+            "UNION ALL SELECT submitted_at ts FROM comment_bank WHERE submitted_at IS NOT NULL)"
+        ).fetchone()['ts']
+    finally:
+        conn.close()
+    if recent:
+        try:
+            last = datetime.fromisoformat(recent)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            until = last + timedelta(hours=8)
+            if utc_now() < until:
+                return True, f'janela de protecao de 8h ate {iso(until)}'
+        except ValueError:
+            pass
+    return False, ''
+
+
+def fetch(url: str, timeout: int = 25) -> tuple[int, str, dict[str, str]]:
+    req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode('utf-8', 'replace')
+            return resp.status, body, dict(resp.headers.items())
+    except urllib.error.HTTPError as exc:
+        headers = dict(exc.headers.items()) if exc.headers else {}
+        body = exc.read().decode('utf-8', 'replace') if exc.fp else ''
+        return exc.code, body, headers
+    except Exception as exc:
+        return 0, f'{type(exc).__name__}: {exc}', {}
+
+
+def strip_tags(value: str) -> str:
+    value = re.sub(r'<br\s*/?>', ' ', value, flags=re.I)
+    value = re.sub(r'<[^>]+>', ' ', value)
+    value = html.unescape(value)
+    return re.sub(r'\s+', ' ', value).strip()
+
+DETAIL_GROUPS = [
+    ('photos', 'photo', 'réelle', 'reelle', 'conforme'),
+    ('rdv', 'rendez-vous', 'rendez vous', 'ponctuel', 'ponctuelle'),
+    ('accueil', 'souriante', 'sympathique', 'respectueuse', 'attentionnée'),
+    ('massage', 'ambiance', 'conversation', 'social time', 'hygiène', 'hygiene'),
+    ('prestation', 'service', 'qualité', 'qualite', 'prix', 'temps'),
+    ('recommande', 'recommand', 'revoir', 'retourner', 'deuxième', 'deuxieme'),
+]
+PROMO_TERMS = ('telegram', 'whatsapp', 'contactez-moi', 'contacte moi', 'http://', 'https://', '@')
+CRUDE_TERMS = ('pute', 'salope', 'gorge profonde', 'facefuck', 'baiser', 'bite', 'chatte')
+
+
+def score_comment(text: str) -> float:
+    low = text.lower()
+    n = len(text)
+    score = 4.0
+    if n < 100:
+        score -= 2.0
+    elif n < 220:
+        score += 0.8
+    elif n < 650:
+        score += 1.5
+    else:
+        score += 1.2
+
+    matched = sum(1 for group in DETAIL_GROUPS if any(term in low for term in group))
+    score += min(2.4, matched * 0.45)
+    if any(token in low for token in ('je ', "j'", 'nous ')):
+        score += 0.4
+    if any(token in low for token in ('deuxième', 'deuxieme', 'encore', 'revenir', 'revoir')):
+        score += 0.4
+    if text.count('.') + text.count('!') + text.count('?') >= 2:
+        score += 0.3
+    if any(term in low for term in PROMO_TERMS):
+        score -= 2.0
+    if sum(1 for term in CRUDE_TERMS if term in low) >= 2:
+        score -= 1.0
+    letters = [c for c in text if c.isalpha()]
+    if letters:
+        upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+        if upper_ratio > 0.35:
+            score -= 1.0
+    return round(max(0.0, min(10.0, score)), 1)
+
+
+def parse_comments(body: str) -> list[dict[str, str]]:
+    pattern = re.compile(
+        r'<div id="cm_(\d+)".*?<div class="info">\s*par\s*<span>\s*'
+        r'<a href="(/member/[^"]+)">.*?</a>\s*</span><br\s*/?>\s*'
+        r'([^<]+)<br\s*/?>\s*</div>\s*<p>(.*?)</p>',
+        re.I | re.S,
+    )
+    rows = []
+    for match in pattern.finditer(body):
+        comment_id, member_href, date_text, raw_comment = match.groups()
+        comment = strip_tags(raw_comment)
+        if not comment:
+            continue
+        rows.append({
+            'comment_id': comment_id,
+            'member_href': member_href.lower(),
+            'date_text': strip_tags(date_text),
+            'comment': comment,
+        })
+    return rows
+
+
+def pager_urls(body: str, section_id: str) -> list[str]:
+    pattern = rf'href="(/comments/index/1/section/profiles/section_id/{re.escape(section_id)}/page\d+\.html)"'
+    return sorted({BASE + html.unescape(x) for x in re.findall(pattern, body, flags=re.I)})
+
+def ensure_sitemap(conn: sqlite3.Connection) -> bool:
+    stale = True
+    if SITEMAP_CACHE.exists():
+        age = utc_now().timestamp() - SITEMAP_CACHE.stat().st_mtime
+        stale = age > 7 * 24 * 3600
+    if not stale:
+        return True
+
+    status, body, _ = fetch(BASE + '/sitemap_alt.xml', timeout=40)
+    if status != 200 or '<urlset' not in body:
+        log_event(conn, 'WARN', f'sitemap indisponivel: HTTP {status}')
+        return SITEMAP_CACHE.exists()
+    SITEMAP_CACHE.write_text(body, encoding='utf-8')
+    log_event(conn, 'INFO', f'sitemap atualizado ({len(body)} bytes)')
+    return True
+
+
+def seed_queue(conn: sqlite3.Connection) -> int:
+    pending = conn.execute("SELECT COUNT(*) n FROM queue WHERE status='PENDING'").fetchone()['n']
+    if pending >= 500:
+        return 0
+    if not ensure_sitemap(conn):
+        return 0
+
+    text = SITEMAP_CACHE.read_text(encoding='utf-8', errors='replace')
+    ids = []
+    seen = set()
+    for match in re.finditer(r'<loc>https://www\.meslibertines\.com/escort/[^<]*?-(\d+)/</loc>', text):
+        sid = match.group(1)
+        if sid not in seen:
+            seen.add(sid)
+            ids.append(sid)
+
+    cursor = int(get_state(conn, 'sitemap_cursor', '0') or 0)
+    if cursor >= len(ids):
+        cursor = 0
+    added = 0
+    for sid in ids[cursor:cursor + 1000]:
+        url = f'{BASE}/comments/index/1/section/profiles/section_id/{sid}/'
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO queue(url,section_id,status,added_at) VALUES(?,?,'PENDING',?)",
+            (url, sid, iso()),
+        )
+        added += cur.rowcount
+    set_state(conn, 'sitemap_cursor', str(min(len(ids), cursor + 1000)))
+    return added
+
+def save_candidate(conn: sqlite3.Connection, row: dict[str, str], score: float, source_url: str, section_id: str) -> bool:
+    profile_hash = hashlib.sha256(row['member_href'].encode('utf-8')).hexdigest()
+    existing = conn.execute(
+        'SELECT profile_id,score FROM candidates WHERE profile_hash=?',
+        (profile_hash,),
+    ).fetchone()
+    if existing and existing['score'] >= score:
+        return False
+
+    if existing:
+        profile_id = existing['profile_id']
+    else:
+        next_no = conn.execute('SELECT COUNT(*) n FROM candidates').fetchone()['n'] + 1
+        profile_id = f'P{next_no:03d}'
+
+    conn.execute(
+        '''INSERT INTO candidates(profile_hash,profile_id,score,date_text,comment,source_url,section_id,updated_at)
+           VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(profile_hash) DO UPDATE SET
+             score=excluded.score,date_text=excluded.date_text,comment=excluded.comment,
+             source_url=excluded.source_url,section_id=excluded.section_id,updated_at=excluded.updated_at''',
+        (profile_hash, profile_id, score, row['date_text'], row['comment'], source_url, section_id, iso()),
+    )
+    return True
+
+
+def export_results(conn: sqlite3.Connection) -> int:
+    rows = [dict(r) for r in conn.execute(
+        'SELECT profile_id,score,date_text,comment,source_url,section_id '
+        'FROM candidates ORDER BY score DESC, profile_id LIMIT ?',
+        (TARGET,),
+    ).fetchall()]
+    EXPORT_JSON.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding='utf-8')
+    with EXPORT_CSV.open('w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['profile_id','score','date_text','comment','source_url','section_id'])
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+def write_status(conn: sqlite3.Connection, note: str = '') -> dict:
+    qualified = conn.execute('SELECT COUNT(*) n FROM candidates').fetchone()['n']
+    pending = conn.execute("SELECT COUNT(*) n FROM queue WHERE status='PENDING'").fetchone()['n']
+    done = conn.execute("SELECT COUNT(*) n FROM queue WHERE status='DONE'").fetchone()['n']
+    errors = conn.execute("SELECT COUNT(*) n FROM queue WHERE status='ERROR'").fetchone()['n']
+    data = {
+        'updated_at': iso(),
+        'target': TARGET,
+        'min_score': MIN_SCORE,
+        'qualified': qualified,
+        'pending_pages': pending,
+        'processed_pages': done,
+        'error_pages': errors,
+        'backoff_until': get_state(conn, 'backoff_until', ''),
+        'note': note,
+        'complete': qualified >= TARGET,
+    }
+    STATUS_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    return data
+
+
+def process_page(conn: sqlite3.Connection, qrow: sqlite3.Row) -> tuple[bool, str]:
+    status, body, headers = fetch(qrow['url'])
+    conn.execute(
+        'UPDATE queue SET attempts=attempts+1, checked_at=? WHERE id=?',
+        (iso(), qrow['id']),
+    )
+
+    if status == 429:
+        retry = headers.get('Retry-After', '').strip()
+        seconds = int(retry) if retry.isdigit() else 6 * 3600
+        until = utc_now() + timedelta(seconds=max(1800, seconds))
+        set_state(conn, 'backoff_until', iso(until))
+        log_event(conn, 'WARN', f'HTTP 429; pausa ate {iso(until)}')
+        return False, 'RATE_LIMIT'
+    if status != 200:
+        new_status = 'ERROR' if qrow['attempts'] >= 2 else 'PENDING'
+        conn.execute('UPDATE queue SET status=? WHERE id=?', (new_status, qrow['id']))
+        log_event(conn, 'WARN', f'HTTP {status} em {qrow["url"]}')
+        return True, f'HTTP_{status}'
+
+    comments = parse_comments(body)
+    new_qualified = 0
+    for row in comments:
+        chash = hashlib.sha256(row['comment'].encode('utf-8')).hexdigest()
+        if conn.execute('SELECT 1 FROM seen_comments WHERE comment_hash=?', (chash,)).fetchone():
+            continue
+        conn.execute(
+            'INSERT INTO seen_comments(comment_hash,seen_at) VALUES(?,?)',
+            (chash, iso()),
+        )
+        score = score_comment(row['comment'])
+        if score >= MIN_SCORE:
+            if save_candidate(conn, row, score, qrow['url'], qrow['section_id']):
+                new_qualified += 1
+
+    for url in pager_urls(body, qrow['section_id']):
+        conn.execute(
+            "INSERT OR IGNORE INTO queue(url,section_id,status,added_at) VALUES(?,?,'PENDING',?)",
+            (url, qrow['section_id'], iso()),
+        )
+    conn.execute("UPDATE queue SET status='DONE' WHERE id=?", (qrow['id'],))
+    set_state(conn, 'backoff_until', '')
+    log_event(
+        conn,
+        'INFO',
+        f'pagina processada: comentarios={len(comments)}, novos>=8={new_qualified}, section={qrow["section_id"]}',
+    )
+    return True, 'OK'
+
+
+def backoff_active(conn: sqlite3.Connection) -> tuple[bool, str]:
+    raw = get_state(conn, 'backoff_until', '')
+    if not raw:
+        return False, ''
+    try:
+        until = datetime.fromisoformat(raw)
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        if utc_now() < until:
+            return True, raw
+    except ValueError:
+        pass
+    set_state(conn, 'backoff_until', '')
+    return False, ''
+
+def run(max_pages: int) -> int:
+    init_db()
+    with connect() as conn:
+        current = export_results(conn)
+        if current >= TARGET:
+            write_status(conn, 'alvo concluido; nenhuma nova requisicao')
+            print(f'COMPLETE {current}/{TARGET}', flush=True)
+            return 0
+
+        busy, reason = main_site_busy()
+        if busy:
+            write_status(conn, 'pausado: ' + reason)
+            print('PAUSED', reason, flush=True)
+            return 0
+
+        blocked, until = backoff_active(conn)
+        if blocked:
+            write_status(conn, f'backoff HTTP ate {until}')
+            print('BACKOFF', until, flush=True)
+            return 0
+
+        added = seed_queue(conn)
+        conn.commit()
+        if added:
+            print(f'QUEUE_SEEDED +{added}', flush=True)
+
+        processed = 0
+        while processed < max_pages:
+            if conn.execute('SELECT COUNT(*) n FROM candidates').fetchone()['n'] >= TARGET:
+                break
+            qrow = conn.execute(
+                "SELECT * FROM queue WHERE status='PENDING' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if not qrow:
+                seed_queue(conn)
+                conn.commit()
+                qrow = conn.execute(
+                    "SELECT * FROM queue WHERE status='PENDING' ORDER BY id LIMIT 1"
+                ).fetchone()
+                if not qrow:
+                    break
+            should_continue, result = process_page(conn, qrow)
+            conn.commit()
+            processed += 1
+            if result == 'RATE_LIMIT' or not should_continue:
+                break
+            if processed < max_pages:
+                time.sleep(5)
+
+        count = export_results(conn)
+        note = f'rodada concluida: paginas={processed}, qualificados={count}/{TARGET}'
+        status = write_status(conn, note)
+        log_event(conn, 'INFO', note)
+        conn.commit()
+        print(json.dumps(status, ensure_ascii=False), flush=True)
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max-pages', type=int, default=6)
+    args = parser.parse_args()
+    max_pages = max(1, min(20, args.max_pages))
+    return run(max_pages)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
